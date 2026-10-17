@@ -42,7 +42,10 @@ jobs:
           sha1sum -c roms.sha1 --ignore-missing
 
       - name: 3dsx und CIA bauen
-        run: make -C port3ds -j$(nproc) cia
+        run: |
+          make -C port3ds -j$(nproc) cia
+          # Symboltabelle zum Auswerten von Absturzadressen (Luma-Crashdumps)
+          arm-none-eabi-nm -n -C port3ds/3ds/pokered-de.elf > port3ds/pokered-de-symbole.txt
 
       - name: Artefakte hochladen
         uses: actions/upload-artifact@v4
@@ -51,6 +54,7 @@ jobs:
           path: |
             port3ds/pokered-de.cia
             port3ds/3ds/pokered-de.3dsx
+            port3ds/pokered-de-symbole.txt
 
   difftest:
     runs-on: ubuntu-latest

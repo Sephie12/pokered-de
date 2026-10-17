@@ -322,7 +322,7 @@ int main(int argc, char **argv)
 {
     U8 cfg[8];
     u32 down, held;
-    int save_delay;
+    int save_delay, rc, logged_frames;
     touchPosition touch;
 
     (void)argc;
@@ -338,20 +338,36 @@ int main(int argc, char **argv)
     gfxSet3D(false);
     fsInit();
     ui_init();
-    audio_init();
-
     s_use_archive = !envIsHomebrew();
-    gb_log("Start: %s\n", s_use_archive ? "Spielstand-Archiv (CIA)" : "SD-Karte (3dsx)");
+    gb_log("--- Start (%s)\n", s_use_archive ? "CIA, Spielstand-Archiv" : "3dsx, SD-Karte");
 
+    /* Abgesicherter Start: L gedrueckt halten -> ohne Ton,
+     * R gedrueckt halten -> gespeicherte Einstellungen ignorieren */
+    hidScanInput();
+    held = hidKeysHeld();
+    if (held & KEY_L) {
+        gb_log("Ton per L uebersprungen\n");
+    } else {
+        gb_log("ndspInit ...\n");
+        audio_init();
+        gb_log("Ton: %s\n", s_audio_ok ? "an" : "aus");
+    }
+
+    gb_log("gb_init (ROM %lu Bytes)\n", (unsigned long)pokered_bin_size);
     gb_init(pokered_bin, (U32)pokered_bin_size);
-    if (store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 0) < 0) {
+    rc = store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 0);
+    if (rc < 0) {
         memset(g_gb.sram, 0xFF, SRAM_SIZE);
     }
+    gb_log("Spielstand: %s\n", rc == 0 ? "geladen" : rc > 0 ? "von SD geladen" : "keiner");
     g_gb.sram_dirty = 0;
-    if (store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 0) >= 0) {
+    if (!(held & KEY_R) && store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 0) >= 0) {
+        gb_log("Einstellungen: %02X %02X %02X %02X %02X\n", cfg[0], cfg[1], cfg[2], cfg[3], cfg[4]);
         ui_settings_load(cfg);
     }
     gb_set_color_mode(g_ui.color_mode);
+    gb_log("Hauptschleife\n");
+    logged_frames = 0;
 
     save_delay = 0;
     while (aptMainLoop()) {
@@ -389,6 +405,10 @@ int main(int argc, char **argv)
             save_config();
         }
 
+        if (logged_frames < 2) {
+            logged_frames++;
+            gb_log("Frame %d ok\n", logged_frames);
+        }
         ui_tick();
         ui_draw_top(s_top);
         present(GFX_TOP, s_top, TOP_W, TOP_H);
@@ -399,6 +419,10 @@ int main(int argc, char **argv)
         gfxFlushBuffers();
         gfxSwapBuffers();
         gspWaitForVBlank();
+        if (logged_frames == 2) {
+            logged_frames++;
+            gb_log("Erstes Bild ausgegeben\n");
+        }
     }
 
     if (g_gb.sram_dirty & 1) {

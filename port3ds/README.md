@@ -56,7 +56,7 @@ Die GitHub Action `.github/workflows/3ds.yml` baut 3dsx und CIA bei jedem Push u
 - **Offizielle VC-Version:** Ist sie installiert, wird sie durch die CIA ersetzt, weil beide dieselbe Title ID haben. Sichere den Spielstand vorher mit Checkpoint oder PKSM.
 - **PKSM:** In den PKSM-Einstellungen unter Title IDs muss für die Rote Edition `0x0004000000171300` eingetragen sein. Standardmäßig steht dort die englische `...171000`. PKSM findet `/sav.dat` dann wie bei der VC-Version.
 - **Ton:** Ton braucht `sdmc:/3ds/dspfirm.cdc`, das du mit DSP1 erzeugst. Ohne die Datei läuft das Spiel stumm; auf dem unteren Bildschirm unter Optionen steht dann „Ton: aus“.
-- **Fehlersuche:** Der Port schreibt Fehlercodes nach `sdmc:/3ds/pokered-de/log.txt`.
+- **Fehlersuche:** Der Port schreibt den Startablauf und Fehlercodes nach `sdmc:/3ds/pokered-de/log.txt`. Abgesicherter Start: **L** beim Starten gedrückt halten startet ohne Ton, **R** ignoriert die gespeicherten Einstellungen. Die Symboltabelle `pokered-de-symbole.txt` im CI-Artefakt ordnet Absturzadressen Funktionen zu.
 - **3dsx:** Gestartet aus dem Homebrew Launcher liegt der Spielstand unter `sdmc:/3ds/pokered-de/sav.dat`.
 - **Beenden:** HOME-Taste oder START+SELECT+L+R.
 
