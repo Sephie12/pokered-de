@@ -35,6 +35,9 @@ typedef struct {
     char toast[40];
     U32 frame_counter;
     S8  touched_slot;
+    U8  audio_state;    /* 0 unbekannt, 1 an, 2 aus (Firmware fehlt) */
+    U8  save_state;     /* 0 noch nicht, 1 Archiv, 2 SD-Karte, 3 Fehler */
+    U32 audio_rc;
 } UiState;
 
 extern UiState g_ui;

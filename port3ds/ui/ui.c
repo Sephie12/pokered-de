@@ -761,6 +761,18 @@ static void draw_options(void)
     if (num[0] == ' ') num[0] = '0';
     strcat(buf, num);
     text(14, y + 34, buf, COL_TEXT, 1);
+    if (g_ui.audio_state == 1) {
+        text(14, y + 48, "Ton: an", COL_TEXT, 1);
+    } else if (g_ui.audio_state == 2) {
+        text(14, y + 48, "Ton: aus (3ds/dspfirm.cdc fehlt)", COL_TEXT, 1);
+    }
+    if (g_ui.save_state == 1) {
+        text(170, y + 34, "Speicher: Archiv", COL_TEXT, 1);
+    } else if (g_ui.save_state == 2) {
+        text(170, y + 34, "Speicher: SD", COL_TEXT, 1);
+    } else if (g_ui.save_state == 3) {
+        text(170, y + 34, "Speicher: FEHLER", COL_TEXT, 1);
+    }
 }
 
 void ui_init(void)
@@ -800,6 +812,8 @@ int ui_bottom_needs_redraw(void)
     MIX(g_ui.frame_counter >> 4);
     MIX(g_ui.touched_slot);
     MIX(g_ui.scale_mode);
+    MIX(g_ui.save_state);
+    MIX(g_ui.audio_state);
     MIX(g_gb.color_mode);
     for (a = SYM_wPartyCount; a < SYM_wPartyMonNicks + 6 * 11; a++) {
         MIX(wram(a));

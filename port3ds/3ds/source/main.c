@@ -23,6 +23,7 @@
 #define SD_DIR      "sdmc:/3ds/pokered-de"
 #define SD_SAVE     SD_DIR "/sav.dat"
 #define SD_CFG      SD_DIR "/port3ds.cfg"
+#define SD_LOG      SD_DIR "/log.txt"
 #define SRAM_SIZE   0x8000
 
 /* ------------------------------------------------------------------ */
@@ -32,9 +33,21 @@
 void gb_log(const char *fmt, ...)
 {
     va_list ap;
+    FILE *lf;
+
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+    /* Logdatei auf der SD-Karte (zur Fehlersuche) */
+    mkdir("sdmc:/3ds", 0777);
+    mkdir(SD_DIR, 0777);
+    lf = fopen(SD_LOG, "a");
+    if (lf) {
+        va_start(ap, fmt);
+        vfprintf(lf, fmt, ap);
+        va_end(ap);
+        fclose(lf);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -49,24 +62,54 @@ static Result archive_rw(const char *path, void *data, u32 size, int write)
     Handle fh;
     Result rc;
     u32 n;
+    u64 fsize;
+    FS_Path fpath;
 
     rc = FSUSER_OpenArchive(&arch, ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""));
     if (R_FAILED(rc)) {
+        gb_log("OpenArchive: %08lX\n", (unsigned long)rc);
         return rc;
     }
+    fpath = fsMakePath(PATH_ASCII, path);
     if (write) {
-        rc = FSUSER_OpenFile(&fh, arch, fsMakePath(PATH_ASCII, path), FS_OPEN_WRITE | FS_OPEN_CREATE, 0);
+        /* Im Spielstand-Archiv haben Dateien feste Groessen: vorhandene Datei
+         * mit falscher Groesse loeschen, fehlende mit Groesse neu anlegen. */
+        rc = FSUSER_OpenFile(&fh, arch, fpath, FS_OPEN_WRITE, 0);
         if (R_SUCCEEDED(rc)) {
-            FSFILE_SetSize(fh, size);
-            rc = FSFILE_Write(fh, &n, 0, data, size, FS_WRITE_FLUSH);
-            FSFILE_Close(fh);
-            if (R_SUCCEEDED(rc)) {
-                rc = FSUSER_ControlArchive(arch, ARCHIVE_ACTION_COMMIT_SAVE_DATA, NULL, 0, NULL, 0);
+            fsize = 0;
+            FSFILE_GetSize(fh, &fsize);
+            if (fsize != (u64)size) {
+                FSFILE_Close(fh);
+                FSUSER_DeleteFile(arch, fpath);
+                rc = -1;
             }
         }
-    } else {
-        rc = FSUSER_OpenFile(&fh, arch, fsMakePath(PATH_ASCII, path), FS_OPEN_READ, 0);
+        if (R_FAILED(rc)) {
+            rc = FSUSER_CreateFile(arch, fpath, 0, (u64)size);
+            if (R_FAILED(rc)) {
+                gb_log("CreateFile %s: %08lX\n", path, (unsigned long)rc);
+            } else {
+                rc = FSUSER_OpenFile(&fh, arch, fpath, FS_OPEN_WRITE, 0);
+            }
+        }
         if (R_SUCCEEDED(rc)) {
+            rc = FSFILE_Write(fh, &n, 0, data, size, FS_WRITE_FLUSH);
+            FSFILE_Close(fh);
+            if (R_FAILED(rc)) {
+                gb_log("Write %s: %08lX\n", path, (unsigned long)rc);
+            } else {
+                rc = FSUSER_ControlArchive(arch, ARCHIVE_ACTION_COMMIT_SAVE_DATA, NULL, 0, NULL, 0);
+                if (R_FAILED(rc)) {
+                    gb_log("Commit: %08lX\n", (unsigned long)rc);
+                }
+            }
+        } else {
+            gb_log("OpenFile %s: %08lX\n", path, (unsigned long)rc);
+        }
+    } else {
+        rc = FSUSER_OpenFile(&fh, arch, fpath, FS_OPEN_READ, 0);
+        if (R_SUCCEEDED(rc)) {
+            n = 0;
             rc = FSFILE_Read(fh, &n, 0, data, size);
             FSFILE_Close(fh);
             if (R_SUCCEEDED(rc) && n != size) {
@@ -96,16 +139,31 @@ static int sd_rw(const char *path, void *data, u32 size, int write)
 static int store_rw(const char *arch_path, const char *sd_path, void *data, u32 size, int write)
 {
     if (s_use_archive) {
-        return R_SUCCEEDED(archive_rw(arch_path, data, size, write)) ? 0 : -1;
+        if (R_SUCCEEDED(archive_rw(arch_path, data, size, write))) {
+            return 0;
+        }
+        /* Archiv nicht nutzbar: Spielstand zumindest auf der SD-Karte sichern/laden */
+        if (sd_rw(sd_path, data, size, write) == 0) {
+            return 1;
+        }
+        return -1;
     }
     return sd_rw(sd_path, data, size, write);
 }
 
 static void save_sram(void)
 {
-    if (store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 1) == 0) {
+    int rc;
+
+    rc = store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 1);
+    if (rc == 0) {
+        g_ui.save_state = s_use_archive ? 1 : 2;
         ui_toast("Spielstand gesichert");
+    } else if (rc > 0) {
+        g_ui.save_state = 2;
+        ui_toast("Gesichert (nur SD-Karte)");
     } else {
+        g_ui.save_state = 3;
         ui_toast("Fehler beim Sichern!");
     }
     g_gb.sram_dirty = 0;
@@ -160,9 +218,14 @@ static void audio_init(void)
 {
     float mix[12];
     int i;
+    Result rc;
 
-    if (R_FAILED(ndspInit())) {
+    rc = ndspInit();
+    if (R_FAILED(rc)) {
         s_audio_ok = 0;   /* dspfirm.cdc fehlt: ohne Ton weiterspielen */
+        g_ui.audio_state = 2;
+        g_ui.audio_rc = (U32)rc;
+        gb_log("ndspInit: %08lX (sdmc:/3ds/dspfirm.cdc vorhanden?)\n", (unsigned long)rc);
         return;
     }
     ndspSetOutputMode(NDSP_OUTPUT_STEREO);
@@ -178,6 +241,9 @@ static void audio_init(void)
     if (!s_audio_mem) {
         ndspExit();
         s_audio_ok = 0;
+        g_ui.audio_state = 2;
+        g_ui.audio_rc = 0xFFFFFFFFu;
+        gb_log("linearAlloc fuer Audio fehlgeschlagen\n");
         return;
     }
     memset(s_wave, 0, sizeof(s_wave));
@@ -186,6 +252,7 @@ static void audio_init(void)
         s_wave[i].status = NDSP_WBUF_DONE;
     }
     s_audio_ok = 1;
+    g_ui.audio_state = 1;
 }
 
 static void audio_frame(void)
@@ -270,17 +337,18 @@ int main(int argc, char **argv)
     gfxSetDoubleBuffering(GFX_BOTTOM, false);
     gfxSet3D(false);
     fsInit();
+    ui_init();
     audio_init();
 
     s_use_archive = !envIsHomebrew();
+    gb_log("Start: %s\n", s_use_archive ? "Spielstand-Archiv (CIA)" : "SD-Karte (3dsx)");
 
     gb_init(pokered_bin, (U32)pokered_bin_size);
-    ui_init();
-    if (store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 0) != 0) {
+    if (store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 0) < 0) {
         memset(g_gb.sram, 0xFF, SRAM_SIZE);
     }
     g_gb.sram_dirty = 0;
-    if (store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 0) == 0) {
+    if (store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 0) >= 0) {
         ui_settings_load(cfg);
     }
     gb_set_color_mode(g_ui.color_mode);
