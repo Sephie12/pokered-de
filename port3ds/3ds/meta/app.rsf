@@ -178,6 +178,13 @@ AccessControlInfo:
     KernelSetState: 124
     QueryProcessMemory: 125
   InterruptNumbers:
+  # DSP-Speicher (Ton ueber NDSP) und VRAM in den Prozess einblenden.
+  # Ohne diese Eintraege stuerzt ndspInit beim Schreiben nach 0x1FF5xxxx ab.
+  IORegisterMapping:
+   - 1ff50000-1ff57fff
+   - 1ff70000-1ff77fff
+  MemoryMapping:
+   - 1f000000-1f5fffff:r
 
 SystemControlInfo:
   SaveDataSize: 128KB
