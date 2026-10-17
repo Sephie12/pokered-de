@@ -45,7 +45,7 @@ jobs:
         run: |
           make -C port3ds -j$(nproc) cia
           # Symboltabelle zum Auswerten von Absturzadressen (Luma-Crashdumps)
-          arm-none-eabi-nm -n -C port3ds/3ds/pokered-de.elf > port3ds/pokered-de-symbole.txt
+          $DEVKITARM/bin/arm-none-eabi-nm -n -C port3ds/3ds/pokered-de.elf > port3ds/pokered-de-symbole.txt
 
       - name: Artefakte hochladen
         uses: actions/upload-artifact@v4
