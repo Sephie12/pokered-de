@@ -55,6 +55,7 @@ void gb_log(const char *fmt, ...)
 /* ------------------------------------------------------------------ */
 
 static int s_use_archive;
+static volatile int s_archive_bad;   /* Archiv nicht nutzbar -> nur noch SD */
 
 static Result archive_rw(const char *path, void *data, u32 size, int write)
 {
@@ -69,16 +70,19 @@ static Result archive_rw(const char *path, void *data, u32 size, int write)
     if (R_FAILED(rc) && (rc == (Result)0xC8A04554 || rc == (Result)0xC8A04555)) {
         /* Spielstand-Archiv existiert, ist aber noch nicht formatiert (erster
          * Start nach der Installation). Wie Retail-Spiele selbst formatieren:
-         * 128 KiB = 256 Bloecke, Daten intern doppelt gespeichert. */
+         * Daten intern doppelt gespeichert (wie bei Retail-Spielen). */
         gb_log("Spielstand-Archiv nicht formatiert (%08lX) -> formatieren\n", (unsigned long)rc);
-        rc = FSUSER_FormatSaveData(ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""), 0x100, 10, 10, 11, 11, true);
+        /* Parameter 3 ist die Blockgroesse (0x200 oder 0x1000), nicht die Anzahl;
+         * die Gesamtgroesse kommt aus dem Exheader (SaveDataSize). */
+        rc = FSUSER_FormatSaveData(ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""), 0x200, 10, 10, 11, 11, true);
         gb_log("FormatSaveData: %08lX\n", (unsigned long)rc);
         if (R_SUCCEEDED(rc)) {
             rc = FSUSER_OpenArchive(&arch, ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""));
         }
     }
     if (R_FAILED(rc)) {
-        gb_log("OpenArchive: %08lX\n", (unsigned long)rc);
+        gb_log("OpenArchive: %08lX -> Archiv wird nicht mehr verwendet\n", (unsigned long)rc);
+        s_archive_bad = 1;
         return rc;
     }
     fpath = fsMakePath(PATH_ASCII, path);
@@ -149,7 +153,7 @@ static int sd_rw(const char *path, void *data, u32 size, int write)
 
 static int store_rw(const char *arch_path, const char *sd_path, void *data, u32 size, int write)
 {
-    if (s_use_archive) {
+    if (s_use_archive && !s_archive_bad) {
         if (R_SUCCEEDED(archive_rw(arch_path, data, size, write))) {
             return 0;
         }
@@ -162,29 +166,141 @@ static int store_rw(const char *arch_path, const char *sd_path, void *data, u32 
     return sd_rw(sd_path, data, size, write);
 }
 
-static void save_sram(void)
+/* Speichern im Hintergrund: der Archiv-Zugriff dauert (Commit, SD) und darf
+ * weder Bild noch Ton anhalten. Der Hauptthread kopiert den SRAM und stoesst
+ * den Worker an; Ergebnisse werden im Hauptthread ausgewertet. */
+#define JOB_SRAM 1
+#define JOB_CFG  2
+
+static Thread s_thread;
+static LightEvent s_ev;
+static volatile int s_quit;
+static volatile u32 s_jobs;
+static volatile int s_busy;
+static volatile int s_done_sram;
+static volatile int s_sram_rc;
+static int s_want_sram, s_want_cfg, s_force_save;
+static U8 s_snap[SRAM_SIZE];
+static U8 s_last_saved[SRAM_SIZE];
+static U8 s_cfg_snap[8];
+
+static void run_jobs(u32 jobs)
 {
     int rc;
 
-    rc = store_rw("/sav.dat", SD_SAVE, g_gb.sram, SRAM_SIZE, 1);
-    if (rc == 0) {
-        g_ui.save_state = s_use_archive ? 1 : 2;
-        ui_toast("Spielstand gesichert");
-    } else if (rc > 0) {
-        g_ui.save_state = 2;
-        ui_toast("Gesichert (nur SD-Karte)");
-    } else {
-        g_ui.save_state = 3;
-        ui_toast("Fehler beim Sichern!");
+    if (jobs & JOB_SRAM) {
+        rc = store_rw("/sav.dat", SD_SAVE, s_snap, SRAM_SIZE, 1);
+        s_sram_rc = rc;
+        if (rc >= 0) {
+            memcpy(s_last_saved, s_snap, SRAM_SIZE);
+        }
+        s_done_sram = 1;
     }
-    g_gb.sram_dirty = 0;
+    if (jobs & JOB_CFG) {
+        store_rw("/port3ds.cfg", SD_CFG, s_cfg_snap, sizeof(s_cfg_snap), 1);
+    }
 }
 
-static void save_config(void)
+static void save_worker(void *arg)
 {
-    U8 cfg[8];
-    ui_settings_save(cfg);
-    store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 1);
+    u32 jobs;
+
+    (void)arg;
+    for (;;) {
+        LightEvent_Wait(&s_ev);
+        if (s_quit) {
+            break;
+        }
+        jobs = s_jobs;
+        s_jobs = 0;
+        run_jobs(jobs);
+        __atomic_store_n(&s_busy, 0, __ATOMIC_RELEASE);
+    }
+}
+
+static void save_start(void)
+{
+    s32 prio;
+
+    LightEvent_Init(&s_ev, RESET_ONESHOT);
+    prio = 0x30;
+    svcGetThreadPriority(&prio, CUR_THREAD_HANDLE);
+    prio += 1;
+    if (prio > 0x3F) {
+        prio = 0x3F;
+    }
+    s_thread = threadCreate(save_worker, NULL, 32 * 1024, prio, -1, false);
+    if (!s_thread) {
+        gb_log("Speicher-Thread fehlgeschlagen -> synchron speichern\n");
+    }
+}
+
+/* Einmal pro Frame im Hauptthread */
+static void save_pump(void)
+{
+    u32 jobs;
+    int rc;
+
+    if (__atomic_load_n(&s_busy, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    if (s_done_sram) {
+        s_done_sram = 0;
+        rc = s_sram_rc;
+        if (rc == 0) {
+            g_ui.save_state = s_use_archive ? 1 : 2;
+            ui_toast("Spielstand gesichert");
+        } else if (rc > 0) {
+            g_ui.save_state = 2;
+            ui_toast("Gesichert (nur SD-Karte)");
+        } else {
+            g_ui.save_state = 3;
+            ui_toast("Fehler beim Sichern!");
+            g_gb.sram_dirty |= 1;     /* spaeter erneut versuchen */
+        }
+    }
+    jobs = 0;
+    if (s_want_sram) {
+        s_want_sram = 0;
+        memcpy(s_snap, g_gb.sram, SRAM_SIZE);
+        g_gb.sram_dirty &= (U8)~1;
+        if (s_force_save || memcmp(s_snap, s_last_saved, SRAM_SIZE) != 0) {
+            s_force_save = 0;
+            jobs |= JOB_SRAM;
+        }
+    }
+    if (s_want_cfg) {
+        s_want_cfg = 0;
+        ui_settings_save(s_cfg_snap);
+        jobs |= JOB_CFG;
+    }
+    if (!jobs) {
+        return;
+    }
+    if (s_thread) {
+        s_busy = 1;
+        s_jobs = jobs;
+        LightEvent_Signal(&s_ev);
+    } else {
+        run_jobs(jobs);
+    }
+}
+
+/* Beim Beenden: Worker anhalten und alles Ausstehende synchron schreiben */
+static void save_finish(void)
+{
+    if (s_thread) {
+        s_quit = 1;
+        LightEvent_Signal(&s_ev);
+        threadJoin(s_thread, U64_MAX);
+        threadFree(s_thread);
+        s_thread = NULL;
+    }
+    if ((g_gb.sram_dirty & 1) || s_want_sram) {
+        s_want_sram = 1;
+    }
+    s_want_cfg = 1;
+    save_pump();
 }
 
 /* ------------------------------------------------------------------ */
@@ -385,6 +501,13 @@ int main(int argc, char **argv)
     }
     gb_log("Spielstand: %s\n", rc == 0 ? "geladen" : rc > 0 ? "von SD geladen" : "keiner");
     g_gb.sram_dirty = 0;
+    memcpy(s_last_saved, g_gb.sram, SRAM_SIZE);
+    if (rc > 0 && s_use_archive && !s_archive_bad) {
+        /* Stand lag nur auf der SD-Karte (frueherer Fallback): ins Archiv uebernehmen */
+        s_force_save = 1;
+        s_want_sram = 1;
+    }
+    save_start();
     if (!(held & KEY_R) && store_rw("/port3ds.cfg", SD_CFG, cfg, sizeof(cfg), 0) >= 0) {
         gb_log("Einstellungen: %02X %02X %02X %02X %02X\n", cfg[0], cfg[1], cfg[2], cfg[3], cfg[4]);
         ui_settings_load(cfg);
@@ -422,12 +545,13 @@ int main(int argc, char **argv)
             g_gb.sram_dirty &= (U8)~2;
         }
         if (save_delay > 0 && --save_delay == 0) {
-            save_sram();
+            s_want_sram = 1;
         }
         if (g_ui.settings_changed) {
             g_ui.settings_changed = 0;
-            save_config();
+            s_want_cfg = 1;
         }
+        save_pump();
 
         if (logged_frames < 2) {
             logged_frames++;
@@ -449,10 +573,7 @@ int main(int argc, char **argv)
         }
     }
 
-    if (g_gb.sram_dirty & 1) {
-        save_sram();
-    }
-    save_config();
+    save_finish();
     audio_exit();
     fsExit();
     gfxExit();
