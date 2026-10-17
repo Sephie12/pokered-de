@@ -66,6 +66,17 @@ static Result archive_rw(const char *path, void *data, u32 size, int write)
     FS_Path fpath;
 
     rc = FSUSER_OpenArchive(&arch, ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""));
+    if (R_FAILED(rc) && (rc == (Result)0xC8A04554 || rc == (Result)0xC8A04555)) {
+        /* Spielstand-Archiv existiert, ist aber noch nicht formatiert (erster
+         * Start nach der Installation). Wie Retail-Spiele selbst formatieren:
+         * 128 KiB = 256 Bloecke, Daten intern doppelt gespeichert. */
+        gb_log("Spielstand-Archiv nicht formatiert (%08lX) -> formatieren\n", (unsigned long)rc);
+        rc = FSUSER_FormatSaveData(ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""), 0x100, 10, 10, 11, 11, true);
+        gb_log("FormatSaveData: %08lX\n", (unsigned long)rc);
+        if (R_SUCCEEDED(rc)) {
+            rc = FSUSER_OpenArchive(&arch, ARCHIVE_SAVEDATA, fsMakePath(PATH_EMPTY, ""));
+        }
+    }
     if (R_FAILED(rc)) {
         gb_log("OpenArchive: %08lX\n", (unsigned long)rc);
         return rc;
@@ -219,7 +230,20 @@ static void audio_init(void)
     float mix[12];
     int i;
     Result rc;
+    MemInfo mi;
+    PageInfo pi;
 
+    /* ndspInit schreibt in den DSP-Speicher (0x1FF40000-0x1FF7FFFF). Ist er
+     * nicht eingeblendet (Exheader ohne IORegisterMapping), wuerde das
+     * Programm abstuerzen -> vorher pruefen und sonst ohne Ton starten. */
+    if (R_FAILED(svcQueryMemory(&mi, &pi, 0x1FF50000)) || mi.state == MEMSTATE_FREE
+        || R_FAILED(svcQueryMemory(&mi, &pi, 0x1FF70000)) || mi.state == MEMSTATE_FREE) {
+        s_audio_ok = 0;
+        g_ui.audio_state = 2;
+        gb_log("DSP-Speicher nicht eingeblendet -> ohne Ton\n");
+        return;
+    }
+    gb_log("DSP-Speicher: state %lu perm %lu\n", (unsigned long)mi.state, (unsigned long)mi.perm);
     rc = ndspInit();
     if (R_FAILED(rc)) {
         s_audio_ok = 0;   /* dspfirm.cdc fehlt: ohne Ton weiterspielen */
@@ -339,7 +363,7 @@ int main(int argc, char **argv)
     fsInit();
     ui_init();
     s_use_archive = !envIsHomebrew();
-    gb_log("--- Start (%s)\n", s_use_archive ? "CIA, Spielstand-Archiv" : "3dsx, SD-Karte");
+    gb_log("--- Start, Build " __DATE__ " " __TIME__ " (%s)\n", s_use_archive ? "CIA, Spielstand-Archiv" : "3dsx, SD-Karte");
 
     /* Abgesicherter Start: L gedrueckt halten -> ohne Ton,
      * R gedrueckt halten -> gespeicherte Einstellungen ignorieren */
