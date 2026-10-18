@@ -60,6 +60,20 @@ Die GitHub Action `.github/workflows/3ds.yml` baut 3dsx und CIA bei jedem Push u
 - **3dsx:** Gestartet aus dem Homebrew Launcher liegt der Spielstand unter `sdmc:/3ds/pokered-de/sav.dat`.
 - **Beenden:** HOME-Taste oder START+SELECT+L+R.
 
+## Kampf-Menüs auf dem Touchscreen
+
+Im Kampf übernimmt der untere Bildschirm die Menüs des Spiels: Hauptmenü (KAMPF, POKéMON, ITEM, FLUCHT), Attacken mit Typ und AP, Beutel mit Bildlauf und das Team mit Untermenü (WECHSELN, WERTE, ZURÜCK). Die Darstellung folgt dem Spiel (Rahmen, Schrift, Cursor, Team-Icons aus der ROM).
+
+Das Spiel läuft unverändert weiter. Die UI erkennt am Game-Boy-Stapel, in welcher Menüfunktion das Spiel gerade wartet (`RANGES` in `tools/gen_syms.py`), liest den Cursor aus dem WRAM und zeichnet das Menü. Ein Tipp wird in Steuerkreuz- und A-Drücke übersetzt (`ui_virtual_buttons()`), die wie echte Tasten an das Spiel gehen. Steuerkreuz + A funktionieren deshalb genau wie vorher, und der Cursor bleibt auf beiden Bildschirmen gleich. Der Knopf ZURÜCK sendet B. Nicht übernommen werden Safari-Zone, Lehrkampf, Link-Kampf und die Attacken-Menüs von Mimikry und Attackenvergessen. Dort bleibt der Bildschirm bei Team/Karte/Optionen.
+
+Test im Host-Build (zeichnet nur bei Änderung, wie das 3DS-Frontend):
+
+```sh
+./build/pokered_host ../pokered.gbc -i eingabe.txt -f 21000 -b 25 -T 20640
+```
+
+`-b N` schreibt alle N Frames den unteren Bildschirm nach `shots/bNNNNN.ppm`, `-T N` legt im Frame N ein Beispiel-Team und einen gefüllten Beutel an. Im Eingabeskript simuliert eine Zeile `FRAME tX,Y` einen Touch, zum Beispiel `20730 t80,160` für ITEM im Hauptmenü.
+
 ## Steuerung
 
 | 3DS | Spiel |
@@ -68,4 +82,4 @@ Die GitHub Action `.github/workflows/3ds.yml` baut 3dsx und CIA bei jedem Push u
 | START / SELECT | START / SELECT |
 | Steuerkreuz / Schiebepad | Steuerkreuz |
 | L / R | Seite unten wechseln (Team / Karte / Optionen) |
-| Touch | Seite wählen, Optionen ändern |
+| Touch | Seite wählen, Optionen ändern; im Kampf Menüeinträge antippen (siehe unten) |

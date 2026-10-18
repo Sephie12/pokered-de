@@ -51,6 +51,12 @@ void ui_touch(int x, int y);            /* bei neuem Touch-Druck */
 void ui_next_tab(int dir);
 void ui_toast(const char *utf8);
 
+/* Kampfmenues auf dem Touchscreen: Tipps werden zu Tasten fuer das Spiel.
+ * ui_virtual_buttons() einmal pro Frame aufrufen und mit den echten Tasten
+ * ODER-verknuepfen. */
+U8   ui_virtual_buttons(void);
+int  ui_battle_menu_open(void);
+
 /* Einstellungen als 8 Bytes (fuer die Konfigurationsdatei) */
 void ui_settings_save(U8 *out8);
 void ui_settings_load(const U8 *in8);

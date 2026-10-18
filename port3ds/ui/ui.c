@@ -775,6 +775,725 @@ static void draw_options(void)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* Kampf-Menues auf dem unteren Bildschirm                             */
+/*                                                                     */
+/* Das Spiel laeuft unveraendert weiter und wartet in seiner eigenen   */
+/* Menuefunktion (HandleMenuInput). Die UI erkennt am Game-Boy-Stapel, */
+/* welches Menue gerade offen ist, spiegelt den Cursor aus dem WRAM    */
+/* und zeichnet das Menue gross auf den Touchscreen. Ein Tipp wird in  */
+/* Steuerkreuz- und A-Druecke uebersetzt, die wie echte Tasten an das  */
+/* Spiel gehen. Steuerkreuz + A funktionieren daher genau wie vorher.  */
+/* ------------------------------------------------------------------ */
+
+#define BM_NONE     0
+#define BM_MAIN     1
+#define BM_MOVES    2
+#define BM_ITEMS    3
+#define BM_PARTY    4
+#define BM_PARTYSUB 5
+
+#define HIT_UP    100
+#define HIT_DOWN  101
+#define HIT_BACK  102
+
+#define BP_PAPER RGB(0xf6, 0xe9, 0xf7)
+#define BP_INK   RGB(0x2a, 0x28, 0x38)
+#define BP_MID   RGB(0x8f, 0x84, 0xa8)
+#define BP_SEL   RGB(0xe9, 0xd2, 0xee)
+
+#define ITEM_HM01 0xC4
+#define ITEM_TM01 0xC9
+#define ITEM_ROWS 6
+
+static U8  s_bmode;       /* offenes Kampfmenue (BM_*) */
+static int s_bcur;        /* Cursorposition im Menue */
+static int s_bcount;      /* Anzahl Eintraege */
+static int s_btop;        /* erste sichtbare Zeile der Item-Liste */
+
+typedef struct {
+    int x, y, w, h, id;
+} BHit;
+
+static BHit s_hit[16];
+static int s_nhit;
+
+/* Warteschlange virtueller Tasten (Touch -> Steuerkreuz/A/B) */
+static U8 s_qbtn[24];
+static U8 s_qlen, s_qpos, s_qtick, s_qmode;
+
+/* Steht eine Ruecksprungadresse aus [lo,hi) im Stapel des Spiels?
+ * Die ROM-Bank wird bewusst nicht geprueft: Am Frameende laeuft oft gerade
+ * der VBlank-Handler mit einer anderen Bank (Ton). Stattdessen pruefen die
+ * Aufrufer zusaetzlich Menue-Koordinaten im WRAM. */
+static int stack_in(U16 lo, U16 hi)
+{
+    U16 a, v;
+    for (a = g_gb.cpu.sp; a >= 0xC000 && a < 0xDFFE; a = (U16)(a + 2)) {
+        v = (U16)(wram(a) | (wram((U16)(a + 1)) << 8));
+        if (v >= lo && v < hi) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static U8 detect_battle_mode(void)
+{
+    U8 inb;
+    inb = wram(SYM_wIsInBattle);
+    if (inb == 0 || inb == 0xFF || wram(SYM_wBattleType) != 0) {
+        return BM_NONE;
+    }
+    if (stack_in(SYM_PartyMenuOrRockOrRun_partyMonWasSelected, SYM_PartyMenuOrRockOrRun_partyMonWasSelected_END)) {
+        return BM_PARTYSUB;
+    }
+    if (stack_in(SYM_HandlePartyMenuInput, SYM_HandlePartyMenuInput_END)) {
+        return BM_PARTY;
+    }
+    if (wram(SYM_wListMenuID) == 3 && stack_in(SYM_DisplayListMenuIDLoop, SYM_DisplayListMenuIDLoop_END)) {
+        return BM_ITEMS;
+    }
+    if (wram(SYM_wMoveMenuType) == 0 && wram(SYM_wTopMenuItemY) == 12 &&
+        stack_in(SYM_SelectMenuItem, SYM_SelectMenuItem_END)) {
+        return BM_MOVES;
+    }
+    if (wram(SYM_wTopMenuItemY) == 14 && stack_in(SYM_DisplayBattleMenu, SYM_DisplayBattleMenu_END)) {
+        return BM_MAIN;
+    }
+    return BM_NONE;
+}
+
+static int move_count(void)
+{
+    int i, n;
+    n = 0;
+    for (i = 0; i < 4; i++) {
+        if (wram((U16)(SYM_wBattleMonMoves + i))) {
+            n++;
+        }
+    }
+    return n;
+}
+
+static void battle_update(void)
+{
+    int n;
+    s_bmode = detect_battle_mode();
+    s_bcur = 0;
+    s_bcount = 0;
+    switch (s_bmode) {
+    case BM_MAIN:
+        s_bcount = 4;
+        s_bcur = (wram(SYM_wCurrentMenuItem) & 1) * 2 + (wram(SYM_wTopMenuItemX) >= 10 ? 1 : 0);
+        break;
+    case BM_MOVES:
+        s_bcount = move_count();
+        s_bcur = (int)wram(SYM_wCurrentMenuItem) - 1;
+        if (s_bcur < 0) s_bcur = 0;
+        if (s_bcur >= s_bcount) s_bcur = s_bcount - 1;
+        break;
+    case BM_ITEMS:
+        n = wram(SYM_wNumBagItems);
+        if (n > 20) n = 20;
+        s_bcount = n + 1;   /* letzte Zeile: ABBRECHEN */
+        s_bcur = wram(SYM_wListScrollOffset) + wram(SYM_wCurrentMenuItem);
+        if (s_bcur >= s_bcount) s_bcur = s_bcount - 1;
+        break;
+    case BM_PARTY:
+        s_bcount = wram(SYM_wPartyCount);
+        if (s_bcount > 6) s_bcount = 6;
+        s_bcur = wram(SYM_wCurrentMenuItem);
+        if (s_bcur >= s_bcount) s_bcur = s_bcount - 1;
+        break;
+    case BM_PARTYSUB:
+        s_bcount = 3;
+        s_bcur = wram(SYM_wCurrentMenuItem);
+        if (s_bcur > 2) s_bcur = 2;
+        break;
+    default:
+        break;
+    }
+}
+
+/* Signatur der Kampfmenue-Daten fuer ui_bottom_needs_redraw() */
+static U32 battle_signature(U32 h)
+{
+    U16 a;
+    h = (h ^ s_bmode) * 16777619u;
+    h = (h ^ (U32)s_bcur) * 16777619u;
+    h = (h ^ (U32)s_bcount) * 16777619u;
+    if (s_bmode == BM_NONE) {
+        return h;
+    }
+    for (a = SYM_wBattleMonMoves; a < SYM_wBattleMonMoves + 4; a++) h = (h ^ wram(a)) * 16777619u;
+    for (a = SYM_wBattleMonPP; a < SYM_wBattleMonPP + 4; a++) h = (h ^ wram(a)) * 16777619u;
+    if (s_bmode == BM_ITEMS) {
+        for (a = SYM_wNumBagItems; a < SYM_wNumBagItems + 42; a++) h = (h ^ wram(a)) * 16777619u;
+        h = (h ^ wram(SYM_wListScrollOffset)) * 16777619u;
+    }
+    h = (h ^ wram(SYM_wWhichPokemon)) * 16777619u;
+    if (s_bmode == BM_PARTY || s_bmode == BM_PARTYSUB) {
+        h = (h ^ (g_ui.frame_counter >> 4)) * 16777619u;
+    }
+    return h;
+}
+
+/* ---- Namen und Werte aus dem ROM ---- */
+
+/* Eintrag n (1-basiert) aus einer Liste 0x50-terminierter Namen */
+static int rom_name(U8 bank, U16 base, int index, U8 *out, int max)
+{
+    U16 a;
+    int n;
+    U8 c;
+    a = base;
+    while (index > 1) {
+        while (rom(bank, a) != 0x50) {
+            a++;
+        }
+        a++;
+        index--;
+    }
+    for (n = 0; n < max - 1; n++) {
+        c = rom(bank, (U16)(a + n));
+        if (c == 0x50) {
+            break;
+        }
+        out[n] = c;
+    }
+    out[n] = 0x50;
+    return n;
+}
+
+static int item_name(U8 id, U8 *out, int max)
+{
+    if (id >= ITEM_TM01) {
+        char buf[8], num[8];
+        strcpy(buf, "TM");
+        utoa_pad((U32)(id - ITEM_TM01 + 1), num, 2);
+        if (num[0] == ' ') num[0] = '0';
+        strcat(buf, num);
+        return encode(buf, out, max);
+    }
+    if (id >= ITEM_HM01) {
+        char buf[8], num[8];
+        strcpy(buf, "VM");
+        utoa_pad((U32)(id - ITEM_HM01 + 1), num, 2);
+        if (num[0] == ' ') num[0] = '0';
+        strcat(buf, num);
+        return encode(buf, out, max);
+    }
+    return rom_name(BANK_ItemNames, SYM_ItemNames, id, out, max);
+}
+
+static int type_name(U8 type, U8 *out, int max)
+{
+    U16 p;
+    int n;
+    U8 c;
+    p = (U16)(rom(BANK_TypeNames, (U16)(SYM_TypeNames + type * 2)) |
+              (rom(BANK_TypeNames, (U16)(SYM_TypeNames + type * 2 + 1)) << 8));
+    for (n = 0; n < max - 1; n++) {
+        c = rom(BANK_TypeNames, (U16)(p + n));
+        if (c == 0x50) {
+            break;
+        }
+        out[n] = c;
+    }
+    out[n] = 0x50;
+    return n;
+}
+
+static U32 money_value(void)
+{
+    U32 v;
+    int i;
+    U8 b;
+    v = 0;
+    for (i = 0; i < 3; i++) {
+        b = wram((U16)(SYM_wPlayerMoney + i));
+        v = v * 100 + (U32)((b >> 4) * 10 + (b & 15));
+    }
+    return v;
+}
+
+/* ---- Zeichenhilfen im Stil des Spiels ---- */
+
+static void gbframe(int x, int y, int w, int h, U16 bg)
+{
+    panel(x, y, w, h, BP_INK, BP_INK);
+    panel(x + 2, y + 2, w - 4, h - 4, BP_PAPER, BP_PAPER);
+    panel(x + 3, y + 3, w - 6, h - 6, bg, BP_MID);
+}
+
+static void add_hit(int x, int y, int w, int h, int id)
+{
+    if (s_nhit < 16) {
+        s_hit[s_nhit].x = x;
+        s_hit[s_nhit].y = y;
+        s_hit[s_nhit].w = w;
+        s_hit[s_nhit].h = h;
+        s_hit[s_nhit].id = id;
+        s_nhit++;
+    }
+}
+
+static void cursor_glyph(int x, int y)
+{
+    glyph(x, y, 0xED, BP_INK, 2);
+}
+
+/* gefuelltes Dreieck: dir 0 = hoch, 1 = runter */
+static void triangle(int cx, int y, int dir, U16 col)
+{
+    int i, wd;
+    for (i = 0; i < 10; i++) {
+        wd = dir ? (10 - i) : (i + 1);
+        fill(cx - wd, y + i, wd * 2, 1, col);
+    }
+}
+
+static void ball_icon(int x, int y, int state)
+{
+    /* 0 = gesund, 1 = Status, 2 = besiegt */
+    int dx, dy;
+    U16 col;
+    for (dy = 0; dy < 11; dy++) {
+        for (dx = 0; dx < 11; dx++) {
+            int ox, oy;
+            ox = dx - 5;
+            oy = dy - 5;
+            if (ox * ox + oy * oy > 30) {
+                continue;
+            }
+            if (ox * ox + oy * oy > 18) {
+                col = BP_INK;
+            } else if (state == 2) {
+                col = BP_PAPER;
+            } else if (dy < 5) {
+                col = BP_INK;
+            } else {
+                col = (state == 1) ? BP_MID : BP_PAPER;
+            }
+            pset(x + dx, y + dy, col);
+        }
+    }
+}
+
+static void hp_bar(int x, int y, int w, U16 hp, U16 maxhp)
+{
+    int fw;
+    U16 col;
+    fw = maxhp ? (int)((U32)hp * (U32)w / maxhp) : 0;
+    if (hp && fw == 0) fw = 1;
+    col = (hp * 2 > maxhp) ? COL_HP_G : (hp * 5 > maxhp) ? COL_HP_Y : COL_HP_R;
+    panel(x, y, w + 4, 8, BP_PAPER, BP_INK);
+    fill(x + 2, y + 2, fw, 4, col);
+}
+
+static void back_button(int x, int y, int w, int h)
+{
+    gbframe(x, y, w, h, BP_PAPER);
+    /* Pfeil nach links aus 5 Spalten */
+    {
+        int i;
+        for (i = 0; i < 6; i++) {
+            fill(x + 12 + i, y + h / 2 - i, 1, i * 2 + 1, BP_INK);
+        }
+    }
+    text(x + 26, y + h / 2 - 4, "ZUR\xc3\x9c" "CK", BP_INK, 1);
+    add_hit(x, y, w, h, HIT_BACK);
+}
+
+/* Kopfzeile: aktives POKéMON mit Icon, Name, Level und KP */
+static void draw_b_header(int y)
+{
+    U16 hp, maxhp;
+    char buf[16], num[8];
+    int tw;
+    hp = wram16be(SYM_wBattleMonHP);
+    maxhp = wram16be(SYM_wBattleMonMaxHP);
+    gbframe(8, y, 304, 52, BP_PAPER);
+    draw_icon(16, y + 10, species_icon(wram(SYM_wBattleMonSpecies)), hp ? (int)((g_ui.frame_counter >> 4) & 1) : 0, 2);
+    text_game(56, y + 8, &g_gb.wram[SYM_wBattleMonNick - 0xC000], 10, BP_INK, 2);
+    strcpy(buf, "Lv");
+    utoa_pad(wram(SYM_wBattleMonLevel), num, 0);
+    strcat(buf, num);
+    tw = text_width(buf, 1);
+    text(300 - tw, y + 12, buf, BP_INK, 1);
+    text(56, y + 32, "KP", BP_INK, 1);
+    hp_bar(76, y + 31, 124, hp, maxhp);
+    utoa_pad(hp, num, 3);
+    strcpy(buf, num);
+    strcat(buf, "/");
+    utoa_pad(maxhp, num, 3);
+    strcat(buf, num);
+    text(300 - text_width(buf, 1), y + 32, buf, BP_INK, 1);
+}
+
+static void draw_b_main(void)
+{
+    static const char *labels[4] = { "KAMPF", "POK\xc3\xa9MON", "ITEM", "FLUCHT" };
+    int i, x, y, count, st;
+    U16 base, hp;
+    U16 stride;
+    char buf[24], num[8];
+
+    draw_b_header(8);
+    for (i = 0; i < 4; i++) {
+        x = 8 + (i & 1) * 156;
+        y = 68 + (i >> 1) * 66;
+        gbframe(x, y, 148, 58, i == s_bcur ? BP_SEL : BP_PAPER);
+        if (i == s_bcur) {
+            cursor_glyph(x + 8, y + 21);
+        }
+        text(x + 26, y + 21, labels[i], BP_INK, 2);
+        add_hit(x, y, 148, 58, i);
+    }
+    /* Fussleiste: Team (Baelle) und Gegner */
+    count = wram(SYM_wPartyCount);
+    if (count > 6) count = 6;
+    stride = (U16)(SYM_wPartyMon2 - SYM_wPartyMon1);
+    for (i = 0; i < 6; i++) {
+        if (i < count) {
+            base = (U16)(SYM_wPartyMon1 + i * stride);
+            hp = wram16be((U16)(base + (SYM_wPartyMon1HP - SYM_wPartyMon1)));
+            if (wram(SYM_wPlayerMonNumber) == i) {
+                hp = wram16be(SYM_wBattleMonHP);
+            }
+            st = wram((U16)(base + (SYM_wPartyMon1Status - SYM_wPartyMon1))) ? 1 : 0;
+            ball_icon(14 + i * 15, 208, hp == 0 ? 2 : st);
+        } else {
+            ball_icon(14 + i * 15, 208, 2);
+        }
+    }
+    text_game(160, 211, &g_gb.wram[SYM_wEnemyMonNick - 0xC000], 10, BP_INK, 1);
+    strcpy(buf, "Lv");
+    utoa_pad(wram(SYM_wEnemyMonLevel), num, 0);
+    strcat(buf, num);
+    text(300 - text_width(buf, 1), 211, buf, BP_INK, 1);
+}
+
+static void draw_b_moves(void)
+{
+    int i, n, x, y, ppmax, ppnow, base;
+    U8 id, type, ppraw;
+    U8 name[16];
+    char buf[16], num[8];
+
+    n = move_count();
+    draw_b_header(8);
+    gbframe(8, 66, 304, 128, BP_PAPER);
+    for (i = 0; i < 4; i++) {
+        y = 74 + i * 28;
+        id = wram((U16)(SYM_wBattleMonMoves + i));
+        if (i < n) {
+            if (i == s_bcur) {
+                fill(14, y - 2, 292, 26, BP_SEL);
+                cursor_glyph(18, y);
+            }
+            rom_name(BANK_MoveNames, SYM_MoveNames, id, name, sizeof(name));
+            text_game(40, y, name, 12, BP_INK, 2);
+            base = rom(0x0E, (U16)(SYM_Moves + (id - 1) * 6 + 5));
+            ppraw = wram((U16)(SYM_wBattleMonPP + i));
+            ppnow = ppraw & 0x3F;
+            ppmax = base + (base / 5) * (ppraw >> 6);
+            strcpy(buf, "AP ");
+            utoa_pad((U32)ppnow, num, 2);
+            strcat(buf, num);
+            strcat(buf, "/");
+            utoa_pad((U32)ppmax, num, 2);
+            strcat(buf, num);
+            text(300 - text_width(buf, 1), y + 4, buf, ppnow ? BP_INK : COL_ACCENT, 1);
+            add_hit(8, y - 2, 304, 28, i);
+        } else {
+            text(40, y, "-", BP_MID, 2);
+        }
+    }
+    /* Infoleiste: Typ und AP der gewaehlten Attacke */
+    gbframe(8, 200, 196, 32, BP_PAPER);
+    if (n > 0) {
+        id = wram((U16)(SYM_wBattleMonMoves + s_bcur));
+        type = rom(0x0E, (U16)(SYM_Moves + (id - 1) * 6 + 3));
+        x = 18;
+        x += text(x, 206, "TYP/", BP_INK, 1);
+        type_name(type, name, sizeof(name));
+        text_game(x, 206, name, 10, BP_INK, 1);
+        base = rom(0x0E, (U16)(SYM_Moves + (id - 1) * 6 + 5));
+        ppraw = wram((U16)(SYM_wBattleMonPP + s_bcur));
+        ppnow = ppraw & 0x3F;
+        ppmax = base + (base / 5) * (ppraw >> 6);
+        strcpy(buf, "");
+        utoa_pad((U32)ppnow, num, 2);
+        strcat(buf, num);
+        strcat(buf, "/");
+        utoa_pad((U32)ppmax, num, 2);
+        strcat(buf, num);
+        text(18, 218, "AP", BP_INK, 1);
+        text(196 - text_width(buf, 1), 218, buf, BP_INK, 1);
+    }
+    back_button(212, 200, 100, 32);
+}
+
+static void draw_b_items(void)
+{
+    int i, n, idx, y, qty;
+    U8 id;
+    U8 name[16];
+    char buf[24], num[12];
+
+    n = wram(SYM_wNumBagItems);
+    if (n > 20) n = 20;
+    if (s_btop > s_bcur) s_btop = s_bcur;
+    if (s_bcur >= s_btop + ITEM_ROWS) s_btop = s_bcur - ITEM_ROWS + 1;
+    if (s_btop < 0) s_btop = 0;
+
+    gbframe(8, 8, 256, 156, BP_PAPER);
+    for (i = 0; i < ITEM_ROWS; i++) {
+        idx = s_btop + i;
+        if (idx > n) {
+            break;
+        }
+        y = 16 + i * 24;
+        if (idx == s_bcur) {
+            fill(14, y - 2, 244, 22, BP_SEL);
+            cursor_glyph(18, y);
+        }
+        if (idx < n) {
+            id = wram((U16)(SYM_wBagItems + idx * 2));
+            qty = wram((U16)(SYM_wBagItems + idx * 2 + 1));
+            item_name(id, name, sizeof(name));
+            text_game(40, y, name, 10, BP_INK, 2);
+            strcpy(buf, "x");
+            utoa_pad((U32)qty, num, 0);
+            strcat(buf, num);
+            text(256 - text_width(buf, 2), y, buf, BP_INK, 2);
+        } else {
+            text(40, y, "ABBRECHEN", BP_INK, 2);
+        }
+        add_hit(8, y - 2, 256, 24, idx);
+    }
+    /* Bildlauf-Tasten */
+    gbframe(272, 8, 40, 72, BP_PAPER);
+    triangle(292, 38, 0, s_bcur > 0 ? BP_INK : BP_MID);
+    add_hit(272, 8, 40, 72, HIT_UP);
+    gbframe(272, 92, 40, 72, BP_PAPER);
+    triangle(292, 122, 1, s_bcur < n ? BP_INK : BP_MID);
+    add_hit(272, 92, 40, 72, HIT_DOWN);
+    /* Beutel-Info */
+    gbframe(8, 172, 196, 60, BP_PAPER);
+    strcpy(buf, "");
+    utoa_pad((U32)n, num, 0);
+    strcat(buf, num);
+    strcat(buf, "/20");
+    text(20, 184, "BEUTEL", BP_INK, 1);
+    text(196 - text_width(buf, 1), 184, buf, BP_INK, 1);
+    utoa_pad(money_value(), num, 0);
+    text(20, 206, "GELD", BP_INK, 1);
+    text(196 - text_width(num, 1), 206, num, BP_INK, 1);
+    back_button(212, 172, 100, 60);
+}
+
+static void draw_b_party(void)
+{
+    int i, count, py, hl, frame, nx;
+    U16 base, hp, maxhp, stride;
+    U8 species, level, st;
+    char buf[24], num[8];
+
+    count = s_bmode == BM_PARTYSUB ? wram(SYM_wPartyCount) : s_bcount;
+    if (count > 6) count = 6;
+    hl = (s_bmode == BM_PARTYSUB) ? wram(SYM_wWhichPokemon) : s_bcur;
+    stride = (U16)(SYM_wPartyMon2 - SYM_wPartyMon1);
+    frame = (g_ui.frame_counter >> 4) & 1;
+
+    gbframe(8, 8, 304, 206, BP_PAPER);
+    for (i = 0; i < count; i++) {
+        py = 14 + i * 32;
+        base = (U16)(SYM_wPartyMon1 + i * stride);
+        species = wram(SYM_wPartySpecies + i);
+        hp = wram16be((U16)(base + (SYM_wPartyMon1HP - SYM_wPartyMon1)));
+        maxhp = wram16be((U16)(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1)));
+        level = wram((U16)(base + (SYM_wPartyMon1Level - SYM_wPartyMon1)));
+        st = wram((U16)(base + (SYM_wPartyMon1Status - SYM_wPartyMon1)));
+        if (wram(SYM_wPlayerMonNumber) == i) {
+            hp = wram16be(SYM_wBattleMonHP);
+            st = wram(SYM_wBattleMonStatus);
+        }
+        if (i == hl) {
+            fill(14, py, 292, 32, BP_SEL);
+            glyph(16, py + 8, 0xED, BP_INK, 2);
+        }
+        draw_icon(36, py, species_icon(species), (i == hl && hp) ? frame : 0, 2);
+        text_game(76, py + 4, &g_gb.wram[(SYM_wPartyMonNicks + i * 11) - 0xC000], 10, BP_INK, 1);
+        strcpy(buf, "Lv");
+        utoa_pad(level, num, 0);
+        strcat(buf, num);
+        text(172, py + 4, buf, BP_INK, 1);
+        status_text(st, buf);
+        if (hp == 0) {
+            strcpy(buf, "K.O.");
+        }
+        if (buf[0]) {
+            nx = text_width(buf, 1);
+            panel(296 - nx - 8, py + 1, nx + 8, 12, hp ? COL_ACCENT : BP_MID, BP_INK);
+            text(296 - nx - 4, py + 3, buf, COL_TEXT_L, 1);
+        }
+        text(76, py + 19, "KP", BP_INK, 1);
+        hp_bar(96, py + 18, 100, hp, maxhp);
+        utoa_pad(hp, num, 3);
+        strcpy(buf, num);
+        strcat(buf, "/");
+        utoa_pad(maxhp, num, 3);
+        strcat(buf, num);
+        text(298 - text_width(buf, 1), py + 19, buf, BP_INK, 1);
+        if (s_bmode == BM_PARTY) {
+            add_hit(8, py, 304, 32, i);
+        }
+    }
+    if (s_bmode == BM_PARTY) {
+        back_button(8, 218, 104, 20);
+        text(124, 224, "W\xc3\xa4hle ein POK\xc3\xa9MON!", BP_MID, 1);
+    }
+}
+
+static void draw_b_partysub(void)
+{
+    static const char *labels[3] = { "WECHSELN", "WERTE", "ZUR\xc3\x9c" "CK" };
+    int i, y;
+
+    draw_b_party();
+    gbframe(136, 92, 176, 114, BP_PAPER);
+    for (i = 0; i < 3; i++) {
+        y = 100 + i * 34;
+        if (i == s_bcur) {
+            fill(142, y - 2, 164, 30, BP_SEL);
+            cursor_glyph(146, y + 4);
+        }
+        text(170, y + 4, labels[i], BP_INK, 2);
+        add_hit(136, y - 2, 176, 34, i);
+    }
+}
+
+static void draw_battle(void)
+{
+    int y;
+    s_nhit = 0;
+    for (y = 0; y < BOT_H; y++) {
+        fill(0, y, BOT_W, 1, BP_PAPER);
+    }
+    switch (s_bmode) {
+    case BM_MAIN: draw_b_main(); break;
+    case BM_MOVES: draw_b_moves(); break;
+    case BM_ITEMS: draw_b_items(); break;
+    case BM_PARTY: draw_b_party(); break;
+    default: draw_b_partysub(); break;
+    }
+}
+
+/* ---- Eingabe: Tipp -> Tastenfolge ---- */
+
+static void q_push(U8 btn)
+{
+    if (s_qlen < sizeof(s_qbtn)) {
+        s_qbtn[s_qlen++] = btn;
+    }
+}
+
+static void q_start(void)
+{
+    s_qlen = 0;
+    s_qpos = 0;
+    s_qtick = 0;
+    s_qmode = s_bmode;
+}
+
+static void q_walk(int cur, int target, int wrap_count)
+{
+    int d;
+    d = target - cur;
+    if (wrap_count > 2) {
+        if (d > wrap_count / 2) d -= wrap_count;
+        else if (d < -(wrap_count / 2)) d += wrap_count;
+    }
+    while (d > 0) { q_push(BTN_DOWN); d--; }
+    while (d < 0) { q_push(BTN_UP); d++; }
+}
+
+static void battle_select(int id)
+{
+    int cr, cc, tr, tc;
+    q_start();
+    if (s_bmode == BM_MAIN) {
+        cr = s_bcur >> 1; cc = s_bcur & 1;
+        tr = id >> 1; tc = id & 1;
+        if (tr > cr) q_push(BTN_DOWN);
+        if (tr < cr) q_push(BTN_UP);
+        if (tc > cc) q_push(BTN_RIGHT);
+        if (tc < cc) q_push(BTN_LEFT);
+    } else if (s_bmode == BM_PARTY) {
+        q_walk(s_bcur, id, s_bcount);
+    } else {
+        q_walk(s_bcur, id, 0);
+    }
+    q_push(BTN_A);
+}
+
+static void battle_touch(int x, int y)
+{
+    int i;
+    if (s_qpos < s_qlen) {
+        return;     /* vorherige Eingabe laeuft noch */
+    }
+    for (i = 0; i < s_nhit; i++) {
+        BHit *r;
+        r = &s_hit[i];
+        if (x < r->x || y < r->y || x >= r->x + r->w || y >= r->y + r->h) {
+            continue;
+        }
+        if (r->id == HIT_BACK) {
+            q_start();
+            q_push(BTN_B);
+        } else if (r->id == HIT_UP) {
+            q_start();
+            q_push(BTN_UP);
+        } else if (r->id == HIT_DOWN) {
+            q_start();
+            q_push(BTN_DOWN);
+        } else {
+            battle_select(r->id);
+        }
+        return;
+    }
+}
+
+/* Einmal pro Frame vor gb_set_buttons() aufrufen und ODER-verknuepfen */
+U8 ui_virtual_buttons(void)
+{
+    U8 b;
+    if (s_qpos >= s_qlen) {
+        return 0;
+    }
+    if (s_qtick == 0 && s_bmode != s_qmode) {
+        s_qlen = 0;     /* Menue wurde gewechselt: Rest verwerfen */
+        s_qpos = 0;
+        return 0;
+    }
+    b = (s_qtick < 4) ? s_qbtn[s_qpos] : 0;
+    s_qtick++;
+    if (s_qtick >= 10) {
+        s_qtick = 0;
+        s_qpos++;
+    }
+    return b;
+}
+
+int ui_battle_menu_open(void)
+{
+    return s_bmode != BM_NONE;
+}
+
 void ui_init(void)
 {
     memset(&g_ui, 0, sizeof(g_ui));
@@ -793,6 +1512,7 @@ void ui_toast(const char *utf8)
 void ui_tick(void)
 {
     g_ui.frame_counter++;
+    battle_update();
     if (g_ui.toast_frames) {
         g_ui.toast_frames--;
     }
@@ -831,6 +1551,7 @@ int ui_bottom_needs_redraw(void)
         MIX(wram(SYM_wPlayTimeHours));
         MIX(wram(SYM_wPlayerName));
     }
+    h = battle_signature(h);
 #undef MIX
     if (h == last) {
         return 0;
@@ -842,6 +1563,10 @@ int ui_bottom_needs_redraw(void)
 void ui_draw_bottom(U16 *fb)
 {
     target(fb, BOT_W, BOT_H);
+    if (s_bmode != BM_NONE) {
+        draw_battle();
+        return;
+    }
     draw_background();
     switch (g_ui.tab) {
     case TAB_MAP: draw_map(); break;
@@ -863,6 +1588,10 @@ static int hit(const Rect *r, int x, int y)
 void ui_touch(int x, int y)
 {
     int i;
+    if (s_bmode != BM_NONE) {
+        battle_touch(x, y);
+        return;
+    }
     if (y < TAB_H) {
         g_ui.tab = (U8)(x / (BOT_W / TAB_COUNT));
         if (g_ui.tab >= TAB_COUNT) g_ui.tab = TAB_COUNT - 1;

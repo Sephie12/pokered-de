@@ -24,8 +24,25 @@ WANTED = [
     'wCurMap', 'wPlayerName', 'wObtainedBadges', 'wPlayerMoney', 'wIsInBattle',
     'wPlayTimeHours', 'wPlayTimeMinutes', 'wPokedexOwned', 'wPlayerMonNumber',
     'wBattleMonHP', 'wBattleMonStatus', 'wXCoord', 'wYCoord', 'wLastMap',
+    # Kampf-Menues auf dem unteren Bildschirm
+    'wCurrentMenuItem', 'wTopMenuItemX', 'wTopMenuItemY', 'wMaxMenuItem', 'wListScrollOffset', 'wListMenuID',
+    'wBattleMonMoves', 'wBattleMonPP', 'wBattleMonSpecies', 'wBattleMonLevel',
+    'wBattleMonMaxHP', 'wBattleMonNick', 'wEnemyMonNick', 'wEnemyMonLevel',
+    'wNumBagItems', 'wBagItems', 'wBattleType', 'wMoveMenuType', 'wWhichPokemon',
+    'Moves', 'MoveNames', 'TypeNames', 'ItemNames',
 ]
 OPTIONAL = {'BadgeNumbersTileGraphics', 'TextBoxGraphics', 'RedSprite'}
+
+# Codebereiche (Start-Label, End-Label). Steht eine Ruecksprungadresse aus
+# diesem Bereich auf dem Game-Boy-Stapel, wartet das Spiel gerade in dieser
+# Funktion auf eine Eingabe. Daran erkennt die UI das offene Kampfmenue.
+RANGES = [
+    ('DisplayBattleMenu', 'BagWasSelected'),
+    ('SelectMenuItem', 'SelectMenuItem_CursorUp'),
+    ('DisplayListMenuIDLoop', 'DisplayChooseQuantityMenu'),
+    ('HandlePartyMenuInput', 'DrawPartyMenu'),
+    ('PartyMenuOrRockOrRun.partyMonWasSelected', 'PartyMenuOrRockOrRun.switchMon'),
+]
 
 
 def main():
@@ -49,6 +66,15 @@ def main():
         bank, addr = syms[name]
         out.append('#define SYM_%s 0x%04x' % (name, addr))
         out.append('#define BANK_%s 0x%02x' % (name, bank))
+    for start, end in RANGES:
+        if start not in syms or end not in syms:
+            missing.append(start + '..' + end)
+            continue
+        cname = start.replace('.', '_')
+        bank, addr = syms[start]
+        out.append('#define SYM_%s 0x%04x' % (cname, addr))
+        out.append('#define BANK_%s 0x%02x' % (cname, bank))
+        out.append('#define SYM_%s_END 0x%04x' % (cname, syms[end][1]))
     out += ['', '#endif', '']
     if missing:
         print('Fehlende Symbole: ' + ', '.join(missing), file=sys.stderr)

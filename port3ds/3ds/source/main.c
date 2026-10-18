@@ -533,7 +533,7 @@ int main(int argc, char **argv)
             break;
         }
 
-        gb_set_buttons(map_buttons(held));
+        gb_set_buttons((U8)(map_buttons(held) | ui_virtual_buttons()));
         gb_run_frame();
         audio_frame();
 

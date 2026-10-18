@@ -5,6 +5,9 @@
  *   -f N        Anzahl Frames (Standard 600)
  *   -i SCRIPT   Eingabeskript: Zeilen "FRAME TASTEN" (z.B. "300 A", "310 -")
  *   -s N        alle N Frames Screenshot (PPM) nach shots/
+ *   -T N        im Frame N Test-Team und Test-Beutel in den Speicher schreiben
+ *   -b N        alle N Frames unteren Bildschirm nach shots/bNNNNN.ppm
+ *   Eingabeskript: Zeile "FRAME tX,Y" simuliert einen Touch auf den unteren Bildschirm
  *   -m MODUS    dmg | gbc | sgb
  *   -I          nur Interpreter (Differenztest-Referenz)
  *   -t FILE     Trace: pro Frame Hash von WRAM/VRAM/Regs
@@ -17,6 +20,7 @@
 #include <stdarg.h>
 #include "../core/gb.h"
 #include "../ui/ui.h"
+#include "syms.h"
 
 void gb_log(const char *fmt, ...)
 {
@@ -24,6 +28,52 @@ void gb_log(const char *fmt, ...)
     va_start(ap, fmt);
     vfprintf(stderr, fmt, ap);
     va_end(ap);
+}
+
+/* Testdaten: 5 weitere Team-POKeMON und ein gefuellter Beutel (nur -T) */
+static void poke_name(U16 addr, const char *name)
+{
+    int i;
+    for (i = 0; name[i]; i++) {
+        g_gb.wram[(addr + i) - 0xC000] = (U8)(0x80 + (name[i] - 'A'));
+    }
+    g_gb.wram[(addr + i) - 0xC000] = 0x50;
+}
+
+static void poke_test_data(void)
+{
+    static const U8 sp[5] = { 0x54, 0x0E, 0x84, 0x13, 0x14 };
+    static const char *nm[5] = { "PIKACHU", "GENGAR", "SNORLAX", "LAPRAS", "ARCANINE" };
+    static const U16 hp[5] = { 71, 24, 0, 190, 60 };
+    static const U16 mx[5] = { 98, 120, 240, 200, 150 };
+    static const U8 lv[5] = { 42, 50, 55, 52, 48 };
+    static const U8 st[5] = { 0, 0x08, 0, 0, 0x03 };
+    static const U8 bag[7][2] = { { 4, 12 }, { 20, 9 }, { 19, 5 }, { 11, 4 }, { 30, 2 }, { 0xC4, 1 }, { 0xCA, 1 } };
+    U16 stride, base;
+    int k;
+
+    stride = (U16)(SYM_wPartyMon2 - SYM_wPartyMon1);
+    for (k = 0; k < 5; k++) {
+        base = (U16)(SYM_wPartyMon1 + (k + 1) * stride);
+        memcpy(&g_gb.wram[base - 0xC000], &g_gb.wram[SYM_wPartyMon1 - 0xC000], stride);
+        g_gb.wram[base - 0xC000] = sp[k];
+        g_gb.wram[(base + (SYM_wPartyMon1HP - SYM_wPartyMon1)) - 0xC000] = (U8)(hp[k] >> 8);
+        g_gb.wram[(base + (SYM_wPartyMon1HP - SYM_wPartyMon1) + 1) - 0xC000] = (U8)hp[k];
+        g_gb.wram[(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1)) - 0xC000] = (U8)(mx[k] >> 8);
+        g_gb.wram[(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1) + 1) - 0xC000] = (U8)mx[k];
+        g_gb.wram[(base + (SYM_wPartyMon1Level - SYM_wPartyMon1)) - 0xC000] = lv[k];
+        g_gb.wram[(base + (SYM_wPartyMon1Status - SYM_wPartyMon1)) - 0xC000] = st[k];
+        g_gb.wram[(SYM_wPartySpecies + k + 1) - 0xC000] = sp[k];
+        poke_name((U16)(SYM_wPartyMonNicks + (k + 1) * 11), nm[k]);
+    }
+    g_gb.wram[(SYM_wPartySpecies + 6) - 0xC000] = 0xFF;
+    g_gb.wram[SYM_wPartyCount - 0xC000] = 6;
+    for (k = 0; k < 7; k++) {
+        g_gb.wram[(SYM_wBagItems + k * 2) - 0xC000] = bag[k][0];
+        g_gb.wram[(SYM_wBagItems + k * 2 + 1) - 0xC000] = bag[k][1];
+    }
+    g_gb.wram[(SYM_wBagItems + 14) - 0xC000] = 0xFF;
+    g_gb.wram[SYM_wNumBagItems - 0xC000] = 7;
 }
 
 static U8 *s_miss;      /* 512 Baenke * 32 KiB Bitfeld */
@@ -107,7 +157,8 @@ int main(int argc, char **argv)
     FILE *f;
     U8 *rom;
     long size;
-    int frames, shot_every, i, interp_only, frame;
+    int frames, shot_every, bot_every, i, interp_only, frame, test_frame;
+    static U16 bot_buf[BOT_W * BOT_H];
     const char *script, *trace_path, *wav_path, *sav_path, *miss_path;
     U8 mode;
     FILE *trace, *wav;
@@ -124,6 +175,8 @@ int main(int argc, char **argv)
     }
     frames = 600;
     shot_every = 0;
+    bot_every = 0;
+    test_frame = -1;
     script = NULL;
     mode = COLOR_SGB;
     interp_only = 0;
@@ -135,6 +188,8 @@ int main(int argc, char **argv)
         if (!strcmp(argv[i], "-f") && i + 1 < argc) frames = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-i") && i + 1 < argc) script = argv[++i];
         else if (!strcmp(argv[i], "-s") && i + 1 < argc) shot_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-b") && i + 1 < argc) bot_every = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-T") && i + 1 < argc) test_frame = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-m") && i + 1 < argc) {
             i++;
             mode = !strcmp(argv[i], "dmg") ? COLOR_DMG : !strcmp(argv[i], "gbc") ? COLOR_GBC : COLOR_SGB;
@@ -156,6 +211,7 @@ int main(int argc, char **argv)
     fclose(f);
 
     gb_init(rom, (U32)size);
+    ui_init();
     gb_set_color_mode(mode);
     gb_set_recompiled(!interp_only);
     if (sav_path) {
@@ -189,11 +245,22 @@ int main(int argc, char **argv)
 
     for (frame = 0; frame < frames; frame++) {
         while (next_line_frame >= 0 && frame >= next_line_frame) {
-            cur_buttons = parse_buttons(line_btn);
+            if (line_btn[0] == 't') {
+                int tx, ty;
+                if (sscanf(line_btn + 1, "%d,%d", &tx, &ty) == 2) {
+                    ui_touch(tx, ty);
+                }
+            } else {
+                cur_buttons = parse_buttons(line_btn);
+            }
             if (fscanf(sf, "%d %63s", &next_line_frame, line_btn) != 2) next_line_frame = -1;
         }
-        gb_set_buttons(cur_buttons);
+        if (frame == test_frame) {
+            poke_test_data();
+        }
+        gb_set_buttons((U8)(cur_buttons | ui_virtual_buttons()));
         gb_run_frame();
+        ui_tick();
         if (wav) {
             U32 n;
             n = gb_audio_read(abuf, 4096);
@@ -210,6 +277,15 @@ int main(int argc, char **argv)
                     fnv(g_gb.vram, sizeof(g_gb.vram), 2166136261u),
                     fnv(g_gb.oam, sizeof(g_gb.oam), 2166136261u),
                     g_gb.cpu.pc, g_gb.rom_bank);
+        }
+        /* wie das 3DS-Frontend: nur neu zeichnen, wenn sich etwas geaendert hat */
+        if (ui_bottom_needs_redraw()) {
+            ui_draw_bottom(bot_buf);
+        }
+        if (bot_every && (frame % bot_every) == bot_every - 1) {
+            char path[64];
+            sprintf(path, "shots/b%05d.ppm", frame + 1);
+            write_ppm_buf(path, bot_buf, BOT_W, BOT_H);
         }
         if (shot_every && (frame % shot_every) == shot_every - 1) {
             char path[64];
