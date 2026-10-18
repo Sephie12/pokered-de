@@ -217,6 +217,7 @@ void gb_ppu_sync(void);
 void gb_ppu_write(U16 addr, U8 val);
 void gb_ppu_reset(void);
 void gb_ppu_compose_frame(void);
+void gb_ppu_redraw(void);
 void gb_apu_reset(void);
 void gb_apu_sync(void);
 void gb_apu_write(U16 addr, U8 val);

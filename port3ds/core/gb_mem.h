@@ -83,7 +83,7 @@ GB_INLINE void mem_wr(U16 addr, U8 val)
     }
     if (g_gb.ram_enable) {
         g_gb.sram[((U32)(g_gb.ram_bank & 3) << 13) | (addr & 0x1FFF)] = val;
-        g_gb.sram_dirty = 1;
+        g_gb.sram_dirty |= 1;
     }
 }
 

@@ -794,10 +794,12 @@ static void draw_options(void)
 #define BM_PARTY    4
 #define BM_PARTYSUB 5
 #define BM_WAIT     6   /* im Kampf, aber gerade kein Menue (Text, Animationen) */
+#define BM_STATUS   7   /* Werte-Seite eines POKéMON (oben das Spielbild) */
 
 #define HIT_UP    100
 #define HIT_DOWN  101
 #define HIT_BACK  102
+#define HIT_A     103
 
 #define BP_PAPER RGB(0xf6, 0xe9, 0xf7)
 #define BP_INK   RGB(0x2a, 0x28, 0x38)
@@ -846,6 +848,9 @@ static U8 detect_battle_mode(void)
     inb = wram(SYM_wIsInBattle);
     if (inb == 0 || inb == 0xFF || wram(SYM_wBattleType) != 0) {
         return BM_NONE;
+    }
+    if (stack_in(SYM_StatusScreen, SYM_StatusScreen_END)) {
+        return BM_STATUS;
     }
     if (stack_in(SYM_PartyMenuOrRockOrRun_partyMonWasSelected, SYM_PartyMenuOrRockOrRun_partyMonWasSelected_END)) {
         return BM_PARTYSUB;
@@ -1381,6 +1386,22 @@ static void draw_b_partysub(void)
     }
 }
 
+static void draw_b_status(void)
+{
+    int idx;
+    idx = wram(SYM_wWhichPokemon);
+    if (idx > 5) idx = 5;
+    gbframe(8, 8, 304, 92, BP_PAPER);
+    text(24, 20, "WERTE", BP_MID, 2);
+    text_game(24, 52, &g_gb.wram[SYM_wPartyMonNicks - 0xC000 + idx * 11], 10, BP_INK, 2);
+    text(24, 80, "Details auf dem oberen Bildschirm", BP_MID, 1);
+    gbframe(8, 112, 304, 58, BP_SEL);
+    cursor_glyph(16, 133);
+    text(52, 133, "WEITER", BP_INK, 2);
+    add_hit(8, 112, 304, 58, HIT_A);
+    back_button(8, 180, 304, 40);
+}
+
 static void draw_battle(void)
 {
     int y;
@@ -1394,6 +1415,7 @@ static void draw_battle(void)
     case BM_MOVES: draw_b_moves(); break;
     case BM_ITEMS: draw_b_items(); break;
     case BM_PARTY: draw_b_party(); break;
+    case BM_STATUS: draw_b_status(); break;
     default: draw_b_partysub(); break;
     }
 }
@@ -1461,6 +1483,9 @@ static void battle_touch(int x, int y)
         if (r->id == HIT_BACK) {
             q_start();
             q_push(BTN_B);
+        } else if (r->id == HIT_A) {
+            q_start();
+            q_push(BTN_A);
         } else if (r->id == HIT_UP) {
             q_start();
             q_push(BTN_UP);
@@ -1531,22 +1556,27 @@ static int cat_nick(U8 *dst, int n, U16 addr)
     return n;
 }
 
-/* Einmal pro Frame VOR gb_run_frame() aufrufen. Solange ein Kampfmenue offen
- * ist, zeichnet der PPU oben den gesicherten Bildschirm des Spiels
- * (wTileMapBackup: Szene mit leerem Dialogkasten, ohne Menue) und darin eine
- * Frage wie "Was soll MEW tun?". Die Menues laufen unten. */
-void ui_pre_frame(void)
+/* Standbilder der Kampfszene fuer den oberen Bildschirm. Bei offenem Menue
+ * zeigt oben nicht das Spiel (Menue, spaeter umgeladene Kacheln/Paletten),
+ * sondern ein Bild, das beim Oeffnen des Menues aus dem gesicherten
+ * Bildschirm (wTileMapBackup: Szene mit leerem Dialogkasten) und einer
+ * Frage wie "Was soll MEW tun?" erzeugt wird. Varianten:
+ * 0 Hauptmenue/Attacken, 1 Beutel, 2 Team, 3 Team-Untermenue. */
+static U16 s_snap[4][GB_W * GB_H];
+static U8  s_snap_ok;
+static U8  s_prev_mode;
+static int s_prev_cur;
+static int s_hold;
+static U8  s_hold_kind;
+
+static int build_override(int kind)
 {
     U8 l1[32], l2[32];
     int n1, n2, i, r, c;
 
-    g_gb.bg_override_on = 0;
-    if (s_bmode == BM_NONE || s_bmode == BM_WAIT) {
-        return;
-    }
     /* Sicherung: nur, wenn dort wirklich Szene + Dialogkasten liegt */
     if (wram((U16)(SYM_wTileMapBackup + 12 * 20)) != 0x79) {
-        return;
+        return 0;
     }
     for (i = 0; i < 20 * 18; i++) {
         g_gb.bg_override[i] = wram((U16)(SYM_wTileMapBackup + i));
@@ -1558,9 +1588,8 @@ void ui_pre_frame(void)
     }
     n1 = 0;
     n2 = 0;
-    switch (s_bmode) {
-    case BM_MAIN:
-    case BM_MOVES:
+    switch (kind) {
+    case 0:
         n1 = cat_utf8(l1, 0, "Was soll ");
         n1 = cat_nick(l1, n1, SYM_wBattleMonNick);
         n1 = cat_utf8(l1, n1, " tun?");
@@ -1570,24 +1599,119 @@ void ui_pre_frame(void)
             n2 = cat_utf8(l2, n2, " tun?");
         }
         break;
-    case BM_ITEMS:
+    case 1:
         n1 = cat_utf8(l1, 0, "Welches Item?");
         break;
-    case BM_PARTY:
+    case 2:
         n1 = cat_utf8(l1, 0, "W\xc3\xa4hle ein POK\xc3\xa9MON");
         n2 = cat_utf8(l2, 0, "aus!");
         break;
     default:
         n1 = cat_utf8(l1, 0, "Was tun mit");
-        n2 = cat_nick(l2, 0, (U16)(SYM_wPartyMonNicks + wram(SYM_wWhichPokemon) * 11));
-        n2 = cat_utf8(l2, n2, "?");
+        n2 = cat_utf8(l2, 0, "dem POK\xc3\xa9MON?");
         break;
     }
     put_line(14, l1, n1);
     if (n2) {
         put_line(16, l2, n2);
     }
-    g_gb.bg_override_on = 1;
+    return 1;
+}
+
+static void snap_generate(void)
+{
+    int k;
+    s_snap_ok = 0;
+    for (k = 0; k < 4; k++) {
+        if (!build_override(k)) {
+            g_gb.bg_override_on = 0;
+            return;
+        }
+        g_gb.bg_override_on = 1;
+        gb_ppu_redraw();
+        memcpy(s_snap[k], g_gb.frame, sizeof(g_gb.frame));
+    }
+    g_gb.bg_override_on = 0;
+    s_snap_ok = 1;
+}
+
+/* Nach jedem Frame (nach battle_update): Standbild statt Spielbild zeigen.
+ * Direkt nach dem Verlassen eines Menues bleibt das Standbild noch stehen,
+ * solange das Spiel Kacheln umlaedt oder das alte Menue noch zu sehen ist. */
+static void top_update(void)
+{
+    U8 m, p;
+    int menu3, pmenu3, show;
+
+    m = s_bmode;
+    p = s_prev_mode;
+    menu3 = (m == BM_MAIN || m == BM_MOVES || m == BM_ITEMS);
+    pmenu3 = (p == BM_MAIN || p == BM_MOVES || p == BM_ITEMS);
+    show = -1;
+    g_gb.bg_override_on = 0;
+    if (m == BM_NONE) {
+        s_snap_ok = 0;
+        s_hold = 0;
+    } else if (menu3) {
+        if (!pmenu3) {
+            snap_generate();
+        }
+        s_hold = 0;
+        if (s_snap_ok) {
+            show = (m == BM_ITEMS) ? 1 : 0;
+        }
+    } else if (m == BM_PARTY || m == BM_PARTYSUB) {
+        s_hold = 0;
+        if (s_snap_ok) {
+            show = (m == BM_PARTY) ? 2 : 3;
+        }
+    } else if (m == BM_STATUS) {
+        s_hold = 0;
+        if (s_snap_ok) {
+            /* Das Spiel blendet die Seite erst aus (weisser Schirm): Standbild halten */
+            int i;
+            for (i = 1; i < GB_W * GB_H && g_gb.frame[i] == g_gb.frame[0]; i++) {
+            }
+            if (i >= GB_W * GB_H) {
+                show = 3;
+            }
+        }
+    } else {
+        if (p != BM_WAIT && p != BM_NONE) {
+            s_hold = 0;
+            switch (p) {
+            case BM_MAIN:
+                if (s_prev_cur == 1 && wram(SYM_wPartyCount) > 1) {
+                    s_hold = 150;
+                    s_hold_kind = 2;
+                } else {
+                    s_hold = 12;
+                    s_hold_kind = 0;
+                }
+                break;
+            case BM_MOVES: s_hold = 12; s_hold_kind = 0; break;
+            case BM_ITEMS: s_hold = 12; s_hold_kind = 1; break;
+            case BM_PARTY: s_hold = 45; s_hold_kind = 2; break;
+            case BM_PARTYSUB: s_hold = 30; s_hold_kind = 3; break;
+            default: s_hold = 150; s_hold_kind = 2; break;
+            }
+        }
+        if (s_hold > 0 && s_snap_ok) {
+            show = s_hold_kind;
+            s_hold--;
+        }
+    }
+    if (show >= 0) {
+        memcpy(g_gb.frame, s_snap[show], sizeof(g_gb.frame));
+    }
+    s_prev_mode = m;
+    s_prev_cur = s_bcur;
+}
+
+/* bleibt fuer die Frontends: vor dem Frame nichts mehr ueberzeichnen */
+void ui_pre_frame(void)
+{
+    g_gb.bg_override_on = 0;
 }
 
 int ui_battle_menu_open(void)
@@ -1614,6 +1738,7 @@ void ui_tick(void)
 {
     g_ui.frame_counter++;
     battle_update();
+    top_update();
     if (g_ui.toast_frames) {
         g_ui.toast_frames--;
     }

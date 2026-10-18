@@ -390,6 +390,17 @@ void gb_ppu_write(U16 addr, U8 val)
 /* Bild zusammensetzen                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Ganzes Bild mit den aktuellen Registern neu zeichnen (fuer die UI: Standbild
+ * mit bg_override erzeugen). Aendert nur shade/layer/frame, nicht den Takt. */
+void gb_ppu_redraw(void)
+{
+    int ly;
+    for (ly = 0; ly < GB_H; ly++) {
+        render_line(ly);
+    }
+    gb_ppu_compose_frame();
+}
+
 void gb_ppu_compose_frame(void)
 {
     int i, x, y;

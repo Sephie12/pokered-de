@@ -41,6 +41,7 @@ RANGES = [
     ('SelectMenuItem', 'SelectMenuItem_CursorUp'),
     ('DisplayListMenuIDLoop', 'DisplayChooseQuantityMenu'),
     ('HandlePartyMenuInput', 'DrawPartyMenu'),
+    ('StatusScreen', 'StatusScreenExpText'),
     ('PartyMenuOrRockOrRun.partyMonWasSelected', 'PartyMenuOrRockOrRun.switchMon'),
 ]
 

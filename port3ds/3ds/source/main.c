@@ -545,6 +545,11 @@ int main(int argc, char **argv)
             }
             g_gb.sram_dirty &= (U8)~2;
         }
+        /* Zur Sicherheit auch ohne RAM-Sperre sichern: 90 Frames nach dem ersten
+         * Schreibzugriff (Spiel schreibt den Spielstand in einem Rutsch) */
+        if ((g_gb.sram_dirty & 1) && save_delay == 0) {
+            save_delay = 90;
+        }
         if (save_delay > 0 && --save_delay == 0) {
             s_want_sram = 1;
         }
