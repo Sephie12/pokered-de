@@ -55,6 +55,7 @@ void ui_toast(const char *utf8);
  * ui_virtual_buttons() einmal pro Frame aufrufen und mit den echten Tasten
  * ODER-verknuepfen. */
 U8   ui_virtual_buttons(void);
+void ui_pre_frame(void);                /* vor gb_run_frame(): Kampfmenue oben ausblenden */
 int  ui_battle_menu_open(void);
 
 /* Einstellungen als 8 Bytes (fuer die Konfigurationsdatei) */

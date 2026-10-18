@@ -534,6 +534,7 @@ int main(int argc, char **argv)
         }
 
         gb_set_buttons((U8)(map_buttons(held) | ui_virtual_buttons()));
+        ui_pre_frame();
         gb_run_frame();
         audio_frame();
 

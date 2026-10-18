@@ -259,6 +259,7 @@ int main(int argc, char **argv)
             poke_test_data();
         }
         gb_set_buttons((U8)(cur_buttons | ui_virtual_buttons()));
+        ui_pre_frame();
         gb_run_frame();
         ui_tick();
         if (wav) {

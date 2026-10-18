@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /*
  * ui.c - oberer und unterer Bildschirm.
  *
@@ -792,6 +793,7 @@ static void draw_options(void)
 #define BM_ITEMS    3
 #define BM_PARTY    4
 #define BM_PARTYSUB 5
+#define BM_WAIT     6   /* im Kampf, aber gerade kein Menue (Text, Animationen) */
 
 #define HIT_UP    100
 #define HIT_DOWN  101
@@ -861,7 +863,7 @@ static U8 detect_battle_mode(void)
     if (wram(SYM_wTopMenuItemY) == 14 && stack_in(SYM_DisplayBattleMenu, SYM_DisplayBattleMenu_END)) {
         return BM_MAIN;
     }
-    return BM_NONE;
+    return BM_WAIT;
 }
 
 static int move_count(void)
@@ -1029,6 +1031,9 @@ static void gbframe(int x, int y, int w, int h, U16 bg)
 
 static void add_hit(int x, int y, int w, int h, int id)
 {
+    if (s_bmode == BM_WAIT) {
+        return;     /* im Wartezustand ist nichts antippbar */
+    }
     if (s_nhit < 16) {
         s_hit[s_nhit].x = x;
         s_hit[s_nhit].y = y;
@@ -1148,7 +1153,7 @@ static void draw_b_main(void)
         if (i == s_bcur) {
             cursor_glyph(x + 8, y + 21);
         }
-        text(x + 26, y + 21, labels[i], BP_INK, 2);
+        text(x + 26, y + 21, labels[i], s_bmode == BM_WAIT ? BP_MID : BP_INK, 2);
         add_hit(x, y, 148, 58, i);
     }
     /* Fussleiste: Team (Baelle) und Gegner */
@@ -1384,7 +1389,8 @@ static void draw_battle(void)
         fill(0, y, BOT_W, 1, BP_PAPER);
     }
     switch (s_bmode) {
-    case BM_MAIN: draw_b_main(); break;
+    case BM_MAIN:
+    case BM_WAIT: draw_b_main(); break;
     case BM_MOVES: draw_b_moves(); break;
     case BM_ITEMS: draw_b_items(); break;
     case BM_PARTY: draw_b_party(); break;
@@ -1487,6 +1493,101 @@ U8 ui_virtual_buttons(void)
         s_qpos++;
     }
     return b;
+}
+
+/* ---- Oberer Bildschirm: Spielmenue ausblenden ---- */
+
+/* Zeile im Dialogkasten (Kachelzeile 14 oder 16, ab Spalte 1) */
+static void put_line(int row, const U8 *s, int n)
+{
+    int i;
+    for (i = 0; i < n && i < 18; i++) {
+        g_gb.bg_override[row * 20 + 1 + i] = s[i];
+    }
+}
+
+static int cat_utf8(U8 *dst, int n, const char *utf8)
+{
+    U8 tmp[40];
+    int len, i;
+    len = encode(utf8, tmp, sizeof(tmp));
+    for (i = 0; i < len && n < 30; i++) {
+        dst[n++] = tmp[i];
+    }
+    return n;
+}
+
+static int cat_nick(U8 *dst, int n, U16 addr)
+{
+    int i;
+    U8 c;
+    for (i = 0; i < 10; i++) {
+        c = wram((U16)(addr + i));
+        if (c == 0x50) {
+            break;
+        }
+        dst[n++] = c;
+    }
+    return n;
+}
+
+/* Einmal pro Frame VOR gb_run_frame() aufrufen. Solange ein Kampfmenue offen
+ * ist, zeichnet der PPU oben den gesicherten Bildschirm des Spiels
+ * (wTileMapBackup: Szene mit leerem Dialogkasten, ohne Menue) und darin eine
+ * Frage wie "Was soll MEW tun?". Die Menues laufen unten. */
+void ui_pre_frame(void)
+{
+    U8 l1[32], l2[32];
+    int n1, n2, i, r, c;
+
+    g_gb.bg_override_on = 0;
+    if (s_bmode == BM_NONE || s_bmode == BM_WAIT) {
+        return;
+    }
+    /* Sicherung: nur, wenn dort wirklich Szene + Dialogkasten liegt */
+    if (wram((U16)(SYM_wTileMapBackup + 12 * 20)) != 0x79) {
+        return;
+    }
+    for (i = 0; i < 20 * 18; i++) {
+        g_gb.bg_override[i] = wram((U16)(SYM_wTileMapBackup + i));
+    }
+    for (r = 13; r <= 16; r++) {
+        for (c = 1; c <= 18; c++) {
+            g_gb.bg_override[r * 20 + c] = 0x7F;
+        }
+    }
+    n1 = 0;
+    n2 = 0;
+    switch (s_bmode) {
+    case BM_MAIN:
+    case BM_MOVES:
+        n1 = cat_utf8(l1, 0, "Was soll ");
+        n1 = cat_nick(l1, n1, SYM_wBattleMonNick);
+        n1 = cat_utf8(l1, n1, " tun?");
+        if (n1 > 18) {
+            n1 = cat_utf8(l1, 0, "Was soll");
+            n2 = cat_nick(l2, 0, SYM_wBattleMonNick);
+            n2 = cat_utf8(l2, n2, " tun?");
+        }
+        break;
+    case BM_ITEMS:
+        n1 = cat_utf8(l1, 0, "Welches Item?");
+        break;
+    case BM_PARTY:
+        n1 = cat_utf8(l1, 0, "W\xc3\xa4hle ein POK\xc3\xa9MON");
+        n2 = cat_utf8(l2, 0, "aus!");
+        break;
+    default:
+        n1 = cat_utf8(l1, 0, "Was tun mit");
+        n2 = cat_nick(l2, 0, (U16)(SYM_wPartyMonNicks + wram(SYM_wWhichPokemon) * 11));
+        n2 = cat_utf8(l2, n2, "?");
+        break;
+    }
+    put_line(14, l1, n1);
+    if (n2) {
+        put_line(16, l2, n2);
+    }
+    g_gb.bg_override_on = 1;
 }
 
 int ui_battle_menu_open(void)

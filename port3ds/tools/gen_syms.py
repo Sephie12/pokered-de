@@ -29,7 +29,7 @@ WANTED = [
     'wBattleMonMoves', 'wBattleMonPP', 'wBattleMonSpecies', 'wBattleMonLevel',
     'wBattleMonMaxHP', 'wBattleMonNick', 'wEnemyMonNick', 'wEnemyMonLevel',
     'wNumBagItems', 'wBagItems', 'wBattleType', 'wMoveMenuType', 'wWhichPokemon',
-    'Moves', 'MoveNames', 'TypeNames', 'ItemNames',
+    'wTileMapBackup', 'Moves', 'MoveNames', 'TypeNames', 'ItemNames',
 ]
 OPTIONAL = {'BadgeNumbersTileGraphics', 'TextBoxGraphics', 'RedSprite'}
 

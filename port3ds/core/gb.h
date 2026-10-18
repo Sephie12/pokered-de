@@ -173,6 +173,11 @@ typedef struct {
     /* Joypad */
     U8  buttons;
 
+    /* Kampfmenue-Ausblendung (UI): ersetzt die 20x18 Hintergrundkacheln und
+     * blendet Sprites/Fenster aus, solange bg_override_on gesetzt ist */
+    U8  bg_override_on;
+    U8  bg_override[20 * 18];
+
     /* Farbmodus */
     U8  color_mode;
 

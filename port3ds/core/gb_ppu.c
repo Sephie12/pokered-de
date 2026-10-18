@@ -82,6 +82,12 @@ static void render_line(int ly)
     obp1 = g_gb.io[0x49];
     wy = g_gb.io[0x4A];
     wx = g_gb.io[0x4B];
+    if (g_gb.bg_override_on) {
+        /* Das Spiel zeigt sein Bild oft ueber das Fenster: Override ersetzt alles */
+        scx = 0;
+        scy = 0;
+        lcdc = (U8)(lcdc | 0x01);
+    }
     shade = &g_gb.shade[ly * GB_W];
     layer = &g_gb.layer[ly * GB_W];
     win_drawn = 0;
@@ -99,6 +105,9 @@ static void render_line(int ly)
             U8 lo, hi, bit, col;
             px = (x + scx) & 0xFF;
             tile_idx = g_gb.vram[map_base + tile_row * 32 + (px >> 3)];
+            if (g_gb.bg_override_on && tile_row < 18 && (px >> 3) < 20) {
+                tile_idx = g_gb.bg_override[tile_row * 20 + (px >> 3)];
+            }
             if (lcdc & 0x10) {
                 tile_addr = (U16)(tile_idx * 16);
             } else {
@@ -116,7 +125,7 @@ static void render_line(int ly)
     }
 
     /* Fenster */
-    if ((lcdc & 0x21) == 0x21 && ly >= wy && wx <= 166) {
+    if ((lcdc & 0x21) == 0x21 && !g_gb.bg_override_on && ly >= wy && wx <= 166) {
         U16 map_base;
         int wline, start;
         map_base = (lcdc & 0x40) ? 0x1C00 : 0x1800;
@@ -151,7 +160,7 @@ static void render_line(int ly)
     }
 
     /* Sprites */
-    if (lcdc & 0x02) {
+    if ((lcdc & 0x02) && !g_gb.bg_override_on) {
         sprh = (lcdc & 0x04) ? 16 : 8;
         nspr = 0;
         for (i = 0; i < 40 && nspr < 10; i++) {
