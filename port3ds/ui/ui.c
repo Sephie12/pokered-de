@@ -491,6 +491,16 @@ static void status_text(U8 st, char *out)
     else if (st & 0x40) strcpy(out, "PAR");
 }
 
+/* Sind die Daten des eigenen POKeMON im Kampf (wBattleMon*) schon geladen?
+ * InitBattleVariables setzt wBattleMonSpecies zu Kampfbeginn auf 0, erst
+ * beim Herausschicken wird das POKeMON geladen. Bis dahin (Kampf-Intro)
+ * stehen dort KP 0 bzw. Werte des letzten Kampfes; dann gelten die
+ * Teamdaten. */
+static int battle_mon_loaded(void)
+{
+    return wram(SYM_wIsInBattle) != 0 && wram(SYM_wBattleMonSpecies) != 0;
+}
+
 static void draw_team(void)
 {
     int count, i, frame;
@@ -524,7 +534,7 @@ static void draw_team(void)
             maxhp = wram16be((U16)(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1)));
             level = wram((U16)(base + (SYM_wPartyMon1Level - SYM_wPartyMon1)));
             st = wram((U16)(base + (SYM_wPartyMon1Status - SYM_wPartyMon1)));
-            if (wram(SYM_wIsInBattle) && wram(SYM_wPlayerMonNumber) == i) {
+            if (battle_mon_loaded() && wram(SYM_wPlayerMonNumber) == i) {
                 hp = wram16be(SYM_wBattleMonHP);
                 st = wram(SYM_wBattleMonStatus);
             }
@@ -811,6 +821,8 @@ static void draw_options(void)
 #define ITEM_ROWS 6
 
 static U8  s_bmode;       /* offenes Kampfmenue (BM_*) */
+static U8  s_menu_seen;   /* in diesem Kampf schon ein Menue offen gewesen */
+static U8  s_ingame;      /* 0 = Intro/Titel/Hauptmenue: unten schwarz */
 static int s_bcur;        /* Cursorposition im Menue */
 static int s_bcount;      /* Anzahl Eintraege */
 static int s_btop;        /* erste sichtbare Zeile der Item-Liste */
@@ -826,46 +838,147 @@ static int s_nhit;
 static U8 s_qbtn[24];
 static U8 s_qlen, s_qpos, s_qtick, s_qmode;
 
-/* Steht eine Ruecksprungadresse aus [lo,hi) im Stapel des Spiels?
- * Die ROM-Bank wird bewusst nicht geprueft: Am Frameende laeuft oft gerade
- * der VBlank-Handler mit einer anderen Bank (Ton). Stattdessen pruefen die
- * Aufrufer zusaetzlich Menue-Koordinaten im WRAM. */
-static int stack_in(U16 lo, U16 hi)
+/* Steht eine Ruecksprungadresse aus [lo,hi) der Bank 'bank' im Stapel des
+ * Spiels?
+ *
+ * Auf dem Stapel liegen neben Ruecksprungadressen auch gesicherte Register
+ * (push hl usw.), und Adressen ab $4000 sind ohne Bank mehrdeutig: Der
+ * Kampfcode in Bank $0F hat massenhaft Ruecksprungadressen, die zufaellig im
+ * Adressbereich von StatusScreen (Bank $04) liegen. Frueher wurde die Bank
+ * nicht geprueft, dadurch sprang die Erkennung waehrend Attacken-Animationen
+ * fuer einzelne Frames auf Werte-Seite oder Team-Untermenue (Flackern).
+ *
+ * Deshalb zaehlt ein Wert nur, wenn
+ *  - direkt davor in der ROM ein call-Befehl steht (echte Ruecksprungadresse),
+ *  - und bei Adressen ab $4000 die Bank an dieser Stelle des Stapels passt
+ *    (siehe stack_walk()). */
+static int is_call_site(U8 bank, U16 ret)
+{
+    U8 op;
+    if (ret < 0x0003 || ret >= 0x8000) {
+        return 0;
+    }
+    op = rom(ret < 0x4000 ? 0 : bank, (U16)(ret - 3));
+    return op == 0xCD || op == 0xC4 || op == 0xCC || op == 0xD4 || op == 0xDC;
+}
+
+/* Hat der Aufruf, zu dem diese Ruecksprungadresse (Home-Bank) gehoert, vorher
+ * die Bank des Aufrufers als AF gesichert? Das ist bei homecall und beim
+ * Aufruf von GetPredefPointer in Predef der Fall:
+ *     push af / ld a, BANK / ldh [hLoadedROMBank], a / ld [rROMB], a / call
+ * oder erkennbar am Ende eines homecall:
+ *     pop af (bzw. pop bc / ld a, b) / ldh [hLoadedROMBank], a
+ * Dann liegt direkt darueber auf dem Stapel die Bank des Aufrufers. */
+static int saves_bank_on_stack(U16 ret)
+{
+    U8 lo;
+    lo = (U8)(SYM_hLoadedROMBank & 0xFF);
+    if (ret >= 11 && rom(0, (U16)(ret - 11)) == 0xF5 && rom(0, (U16)(ret - 10)) == 0x3E &&
+        rom(0, (U16)(ret - 8)) == 0xE0 && rom(0, (U16)(ret - 7)) == lo &&
+        rom(0, (U16)(ret - 6)) == 0xEA) {
+        return 1;
+    }
+    if (rom(0, ret) == 0xF1) {
+        return rom(0, (U16)(ret + 1)) == 0xE0 && rom(0, (U16)(ret + 2)) == lo;
+    }
+    if (rom(0, ret) == 0xC1 && rom(0, (U16)(ret + 1)) == 0x78) {
+        return rom(0, (U16)(ret + 2)) == 0xE0 && rom(0, (U16)(ret + 3)) == lo;
+    }
+    return 0;
+}
+
+/* Sieht ein Stapelwort wie ein gesichertes AF mit einer ROM-Bank in A aus?
+ * (Die unteren vier Bits von F sind beim Game Boy immer 0.) */
+static int bank_word(U16 w)
+{
+    U8 bk;
+    bk = (U8)(w >> 8);
+    return (w & 0x000F) == 0 && bk != 0 && (U32)bk * 0x4000 < g_gb.rom_size;
+}
+
+static U16 stack_word(U16 a)
+{
+    return (U16)(wram(a) | (wram((U16)(a + 1)) << 8));
+}
+
+/* Geht den Stapel von innen nach aussen durch und fuehrt dabei die aktive
+ * ROM-Bank mit: Bankswitch (farcall), Predef und homecall legen die Bank
+ * des Aufrufers als AF direkt ueber ihrer Ruecksprungmarke ab. */
+static int stack_walk(U16 lo, U16 hi, U8 bank, U8 cur)
 {
     U16 a, v;
     for (a = g_gb.cpu.sp; a >= 0xC000 && a < 0xDFFE; a = (U16)(a + 2)) {
-        v = (U16)(wram(a) | (wram((U16)(a + 1)) << 8));
-        if (v >= lo && v < hi) {
+        v = stack_word(a);
+        if (v == SYM_Bankswitch_Return || v == SYM_Predef_done ||
+            (v < 0x4000 && is_call_site(0, v) && saves_bank_on_stack(v))) {
+            /* gesicherte Bank des Aufrufers; nur uebernehmen, wenn das Wort
+             * wirklich wie ein gesichertes AF aussieht (gesicherte Register
+             * koennen zufaellig denselben Wert wie die Marke haben) */
+            if ((U16)(a + 2) < 0xDFFE && bank_word(stack_word((U16)(a + 2)))) {
+                a = (U16)(a + 2);
+                cur = (U8)(stack_word(a) >> 8);
+            }
+            continue;
+        }
+        if (v < 0x4000) {
+            if (bank == 0 && v >= lo && v < hi && is_call_site(0, v)) {
+                return 1;
+            }
+            continue;
+        }
+        if (v < 0x8000 && bank == cur && v >= lo && v < hi && is_call_site(cur, v)) {
             return 1;
         }
     }
     return 0;
 }
 
-static U8 detect_battle_mode(void)
+/* Endet der Frame mitten im VBlank-Handler, hat dieser die Bank fuer den
+ * Ton gewechselt; dann gilt die dort gesicherte Bank. Beide Startwerte
+ * werden probiert. */
+static int stack_in(U16 lo, U16 hi, U8 bank)
+{
+    U8 hb, vb;
+    hb = g_gb.hram[SYM_hLoadedROMBank - 0xFF80];
+    vb = wram(SYM_wVBlankSavedROMBank);
+    if (stack_walk(lo, hi, bank, hb)) {
+        return 1;
+    }
+    return vb != hb && stack_walk(lo, hi, bank, vb);
+}
+
+#define IN_FUNC(name) stack_in(SYM_##name, SYM_##name##_END, BANK_##name)
+
+/* Kampf laeuft und ist von der Art, die der untere Bildschirm abbildet */
+static int battle_supported(void)
 {
     U8 inb;
     inb = wram(SYM_wIsInBattle);
-    if (inb == 0 || inb == 0xFF || wram(SYM_wBattleType) != 0) {
+    return inb != 0 && inb != 0xFF && wram(SYM_wBattleType) == 0;
+}
+
+static U8 detect_battle_mode(void)
+{
+    if (!battle_supported()) {
         return BM_NONE;
     }
-    if (stack_in(SYM_StatusScreen, SYM_StatusScreen_END)) {
+    if (IN_FUNC(StatusScreen)) {
         return BM_STATUS;
     }
-    if (stack_in(SYM_PartyMenuOrRockOrRun_partyMonWasSelected, SYM_PartyMenuOrRockOrRun_partyMonWasSelected_END)) {
+    if (IN_FUNC(PartyMenuOrRockOrRun_partyMonWasSelected)) {
         return BM_PARTYSUB;
     }
-    if (stack_in(SYM_HandlePartyMenuInput, SYM_HandlePartyMenuInput_END)) {
+    if (IN_FUNC(HandlePartyMenuInput)) {
         return BM_PARTY;
     }
-    if (wram(SYM_wListMenuID) == 3 && stack_in(SYM_DisplayListMenuIDLoop, SYM_DisplayListMenuIDLoop_END)) {
+    if (wram(SYM_wListMenuID) == 3 && IN_FUNC(DisplayListMenuIDLoop)) {
         return BM_ITEMS;
     }
     if (wram(SYM_wMoveMenuType) == 0 && wram(SYM_wTopMenuItemY) == 12 &&
-        stack_in(SYM_SelectMenuItem, SYM_SelectMenuItem_END)) {
+        IN_FUNC(SelectMenuItem)) {
         return BM_MOVES;
     }
-    if (wram(SYM_wTopMenuItemY) == 14 && stack_in(SYM_DisplayBattleMenu, SYM_DisplayBattleMenu_END)) {
+    if (wram(SYM_wTopMenuItemY) == 14 && IN_FUNC(DisplayBattleMenu)) {
         return BM_MAIN;
     }
     return BM_WAIT;
@@ -883,10 +996,40 @@ static int move_count(void)
     return n;
 }
 
+/* Ist der Spieler im eigentlichen Spiel? Gesetzt, sobald die Overworld
+ * laeuft (EnterMap/OverworldLoop auf dem Stapel), zurueckgesetzt auf dem
+ * Titelbild, im Hauptmenue und nach einem Reset (Init loescht das WRAM,
+ * damit auch den Spielernamen). Dazwischen (Kaempfe, Menues, Kartenwechsel)
+ * bleibt der Zustand stehen. */
+static void game_state_update(void)
+{
+    U8 c;
+    c = wram(SYM_wPlayerName);
+    if (c == 0x00 || c == 0x50 || IN_FUNC(DisplayTitleScreen) || IN_FUNC(MainMenu)) {
+        s_ingame = 0;
+    } else if (!s_ingame && IN_FUNC(EnterMap)) {
+        s_ingame = 1;
+    }
+}
+
+
 static void battle_update(void)
 {
     int n;
-    s_bmode = detect_battle_mode();
+    U8 m;
+    m = detect_battle_mode();
+    /* Erst wenn das Spiel zum ersten Mal ein Menue zeigt, uebernimmt der
+     * untere Bildschirm den Kampf. Im Intro ("Ein wildes ... erscheint!",
+     * Herausschicken) bleibt die normale Ansicht stehen, weil dort noch
+     * keine Eingabe moeglich ist. */
+    if (m == BM_NONE) {
+        s_menu_seen = 0;
+    } else if (m != BM_WAIT) {
+        s_menu_seen = 1;
+    } else if (!s_menu_seen) {
+        m = BM_NONE;
+    }
+    s_bmode = m;
     s_bcur = 0;
     s_bcount = 0;
     switch (s_bmode) {
@@ -1122,13 +1265,30 @@ static void draw_b_header(int y)
     U16 hp, maxhp;
     char buf[16], num[8];
     int tw;
-    hp = wram16be(SYM_wBattleMonHP);
-    maxhp = wram16be(SYM_wBattleMonMaxHP);
+    U16 base;
+    U8 idx, species, level;
+    const U8 *nick;
+    if (battle_mon_loaded()) {
+        hp = wram16be(SYM_wBattleMonHP);
+        maxhp = wram16be(SYM_wBattleMonMaxHP);
+        species = wram(SYM_wBattleMonSpecies);
+        level = wram(SYM_wBattleMonLevel);
+        nick = &g_gb.wram[SYM_wBattleMonNick - 0xC000];
+    } else {
+        idx = wram(SYM_wPlayerMonNumber);
+        if (idx > 5) idx = 0;
+        base = (U16)(SYM_wPartyMon1 + idx * (SYM_wPartyMon2 - SYM_wPartyMon1));
+        hp = wram16be((U16)(base + (SYM_wPartyMon1HP - SYM_wPartyMon1)));
+        maxhp = wram16be((U16)(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1)));
+        species = wram((U16)(SYM_wPartySpecies + idx));
+        level = wram((U16)(base + (SYM_wPartyMon1Level - SYM_wPartyMon1)));
+        nick = &g_gb.wram[SYM_wPartyMonNicks - 0xC000 + idx * 11];
+    }
     gbframe(8, y, 304, 52, BP_PAPER);
-    draw_icon(16, y + 10, species_icon(wram(SYM_wBattleMonSpecies)), hp ? (int)((g_ui.frame_counter >> 4) & 1) : 0, 2);
-    text_game(56, y + 8, &g_gb.wram[SYM_wBattleMonNick - 0xC000], 10, BP_INK, 2);
+    draw_icon(16, y + 10, species_icon(species), hp ? (int)((g_ui.frame_counter >> 4) & 1) : 0, 2);
+    text_game(56, y + 8, nick, 10, BP_INK, 2);
     strcpy(buf, "Lv");
-    utoa_pad(wram(SYM_wBattleMonLevel), num, 0);
+    utoa_pad(level, num, 0);
     strcat(buf, num);
     tw = text_width(buf, 1);
     text(300 - tw, y + 12, buf, BP_INK, 1);
@@ -1169,7 +1329,7 @@ static void draw_b_main(void)
         if (i < count) {
             base = (U16)(SYM_wPartyMon1 + i * stride);
             hp = wram16be((U16)(base + (SYM_wPartyMon1HP - SYM_wPartyMon1)));
-            if (wram(SYM_wPlayerMonNumber) == i) {
+            if (wram(SYM_wPlayerMonNumber) == i && battle_mon_loaded()) {
                 hp = wram16be(SYM_wBattleMonHP);
             }
             st = wram((U16)(base + (SYM_wPartyMon1Status - SYM_wPartyMon1))) ? 1 : 0;
@@ -1327,7 +1487,7 @@ static void draw_b_party(void)
         maxhp = wram16be((U16)(base + (SYM_wPartyMon1MaxHP - SYM_wPartyMon1)));
         level = wram((U16)(base + (SYM_wPartyMon1Level - SYM_wPartyMon1)));
         st = wram((U16)(base + (SYM_wPartyMon1Status - SYM_wPartyMon1)));
-        if (wram(SYM_wPlayerMonNumber) == i) {
+        if (wram(SYM_wPlayerMonNumber) == i && battle_mon_loaded()) {
             hp = wram16be(SYM_wBattleMonHP);
             st = wram(SYM_wBattleMonStatus);
         }
@@ -1737,6 +1897,7 @@ void ui_toast(const char *utf8)
 void ui_tick(void)
 {
     g_ui.frame_counter++;
+    game_state_update();
     battle_update();
     top_update();
     if (g_ui.toast_frames) {
@@ -1753,6 +1914,15 @@ int ui_bottom_needs_redraw(void)
     U16 a;
     h = 2166136261u;
 #define MIX(v) (h = (h ^ (U32)(v)) * 16777619u)
+    MIX(s_ingame);
+    if (!s_ingame) {
+        /* schwarzer Bildschirm: nur beim Wechsel einmal zeichnen */
+        if (h == last) {
+            return 0;
+        }
+        last = h;
+        return 1;
+    }
     MIX(g_ui.tab);
     MIX(g_ui.toast_frames ? 1 + g_ui.toast[0] : 0);
     MIX(g_ui.frame_counter >> 4);
@@ -1767,6 +1937,7 @@ int ui_bottom_needs_redraw(void)
     MIX(wram(SYM_wCurMap));
     MIX(wram(SYM_wIsInBattle));
     MIX(wram16be(SYM_wBattleMonHP));
+    MIX(wram(SYM_wBattleMonSpecies));
     MIX(wram(SYM_wPlayerMonNumber));
     if (g_ui.tab == TAB_OPTIONS) {
         MIX(wram(SYM_wObtainedBadges));
@@ -1789,6 +1960,10 @@ int ui_bottom_needs_redraw(void)
 void ui_draw_bottom(U16 *fb)
 {
     target(fb, BOT_W, BOT_H);
+    if (!s_ingame) {
+        fill(0, 0, BOT_W, BOT_H, 0x0000);
+        return;
+    }
     if (s_bmode != BM_NONE) {
         draw_battle();
         return;
@@ -1814,6 +1989,9 @@ static int hit(const Rect *r, int x, int y)
 void ui_touch(int x, int y)
 {
     int i;
+    if (!s_ingame) {
+        return;
+    }
     if (s_bmode != BM_NONE) {
         battle_touch(x, y);
         return;

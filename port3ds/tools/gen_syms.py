@@ -30,6 +30,8 @@ WANTED = [
     'wBattleMonMaxHP', 'wBattleMonNick', 'wEnemyMonNick', 'wEnemyMonLevel',
     'wNumBagItems', 'wBagItems', 'wBattleType', 'wMoveMenuType', 'wWhichPokemon',
     'wTileMapBackup', 'Moves', 'MoveNames', 'TypeNames', 'ItemNames',
+    # aktive ROM-Bank (Pruefung der Ruecksprungadressen auf dem Stapel)
+    'hLoadedROMBank', 'wVBlankSavedROMBank', 'Bankswitch.Return', 'Predef.done',
 ]
 OPTIONAL = {'BadgeNumbersTileGraphics', 'TextBoxGraphics', 'RedSprite'}
 
@@ -43,6 +45,11 @@ RANGES = [
     ('HandlePartyMenuInput', 'DrawPartyMenu'),
     ('StatusScreen', 'StatusScreenExpText'),
     ('PartyMenuOrRockOrRun.partyMonWasSelected', 'PartyMenuOrRockOrRun.switchMon'),
+    # Spielzustand fuer den unteren Bildschirm: Overworld = im Spiel,
+    # Titelbild/Hauptmenue = noch nicht im Spiel (unten schwarz)
+    ('EnterMap', 'NewBattle'),
+    ('DisplayTitleScreen', 'TitleScreenPickNewMon'),
+    ('MainMenu', 'InitOptions'),
 ]
 
 
@@ -65,8 +72,9 @@ def main():
             missing.append(name)
             continue
         bank, addr = syms[name]
-        out.append('#define SYM_%s 0x%04x' % (name, addr))
-        out.append('#define BANK_%s 0x%02x' % (name, bank))
+        cname = name.replace('.', '_')
+        out.append('#define SYM_%s 0x%04x' % (cname, addr))
+        out.append('#define BANK_%s 0x%02x' % (cname, bank))
     for start, end in RANGES:
         if start not in syms or end not in syms:
             missing.append(start + '..' + end)
